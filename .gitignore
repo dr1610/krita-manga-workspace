@@ -1,0 +1,13 @@
+dist/
+release/
+__pycache__/
+*.pyc
+*.pyo
+*.kra
+*.ora
+*.png
+*.jpg
+*.jpeg
+*.webp
+.idea/
+.vscode/

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=manga_workspace
+X-Python-2-Compatible=false
+X-Krita-Manual=manual.html
+Name=Manga Workspace Prototype
+Name[ja]=漫画ワークスペース（試作版）
+Comment=Free prototype workspace for manga production and optional local AI drawing
+Comment[ja]=漫画制作と任意のローカルAI作画を支援する無料公開の試作版
