@@ -178,9 +178,12 @@ class TagPromptEdit(QPlainTextEdit):
         popup.setUniformRowHeights(True)
         popup.setSelectionBehavior(QAbstractItemView.SelectRows)
         popup.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # QTreeView has no columns until QCompleter installs its model.
+        # Krita 5.2's bundled Qt 5.15.7 can access-violate when resize mode
+        # is assigned to column 1 before that model is attached.
+        self.completer.setPopup(popup)
         popup.header().setSectionResizeMode(0, QHeaderView.Stretch)
         popup.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.completer.setPopup(popup)
         self.completer.setWidget(self)
         self.completer.activated[QModelIndex].connect(self.insert_completion_index)
         values, _, source = completion_catalog()

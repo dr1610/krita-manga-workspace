@@ -88,7 +88,11 @@ class WorkspaceExtension(Extension):
         for dock in window.dockers():
             if type(dock).__name__ == "ImageDiffusionWidget" and not isinstance(dock.widget(), CompactScroll):
                 scroll_content(dock, dock.widget())
-        QTimer.singleShot(500, lambda: self.start_window(main))
+        # Krita is still restoring its own dock/widget state while Python
+        # extensions are created.  Calling restoreState()/arrange() from a
+        # startup timer can re-enter Qt/Python callbacks and crash Krita.
+        # Keep the restored Krita workspace untouched at startup.  Users can
+        # explicitly apply or restore the manga layout from the menu.
 
     def install_toolbox_drag(self, main, window):
         """A normal click selects a tool; dragging pulls out Tool Options."""
