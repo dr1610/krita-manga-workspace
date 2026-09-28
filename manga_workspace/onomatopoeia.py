@@ -250,8 +250,10 @@ class OnomatopoeiaSettingsDialog(QDialog):
 
 
 class OnomatopoeiaMaterialDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, initial_text="", fixed_bounds=None, fixed_parent_node=None):
         super().__init__(parent)
+        self.fixed_bounds = list(fixed_bounds) if fixed_bounds else None
+        self.fixed_parent_node = fixed_parent_node
         self.setWindowTitle("オノマトペ素材")
         self.setMinimumSize(760, 680)
         self.resize(860, 760)
@@ -278,7 +280,7 @@ class OnomatopoeiaMaterialDialog(QDialog):
 
         entry = QHBoxLayout()
         entry.addWidget(QLabel("文字"))
-        self.text = QLineEdit("ドン")
+        self.text = QLineEdit(initial_text or "ドン")
         self.text.setPlaceholderText("例：ドン、ザワザワ、キラッ")
         self.text.setMinimumHeight(34)
         self.text.setClearButtonEnabled(True)
@@ -322,7 +324,11 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.slant = QDoubleSpinBox(); self.slant.setRange(-0.6, 0.6); self.slant.setSingleStep(0.05); self.slant.setValue(values["slant"])
         self.angle = QDoubleSpinBox(); self.angle.setRange(-45, 45); self.angle.setValue(values["angle"]); self.angle.setSuffix("°")
         self.target = QComboBox(); self.target.addItem("選択範囲", "selection"); self.target.addItem("現在のコマ", "current_panel"); self.target.addItem("ページ中央", "page_center")
-        self.target.setCurrentIndex(max(0, self.target.findData(values["target"])))
+        if self.fixed_bounds:
+            self.target.insertItem(0, "選択した文字領域", "fixed_region")
+            self.target.setCurrentIndex(0)
+        else:
+            self.target.setCurrentIndex(max(0, self.target.findData(values["target"])))
         self.bold = QCheckBox("太字"); self.bold.setChecked(values["bold"])
         self.vertical = QCheckBox("縦書き"); self.vertical.setChecked(values["vertical"])
         self.shadow = QCheckBox("影"); self.shadow.setChecked(values["shadow"])
@@ -412,6 +418,7 @@ class OnomatopoeiaMaterialDialog(QDialog):
             "selection": "Canvasで囲んだ範囲へ配置します。最も細かく位置を決められます。",
             "current_panel": "コマ一覧で選択中のコマ内へ収めます。コマ外にはみ出しません。",
             "page_center": "ページ中央へ大きめに配置します。作成後に移動・変形できます。",
+            "fixed_region": "MANGA BRIDGE v2形式で登録した文字領域へ正確に配置します。",
         }
         self.target_hint.setText(hints.get(self.target.currentData(), ""))
 
@@ -429,6 +436,8 @@ class OnomatopoeiaMaterialDialog(QDialog):
     def target_geometry(self, document):
         mode = self.target.currentData()
         polygon = None
+        if mode == "fixed_region" and self.fixed_bounds:
+            return list(self.fixed_bounds), polygon
         if mode == "selection":
             selection = document.selection()
             if selection and selection.width() > 0 and selection.height() > 0:
@@ -450,9 +459,15 @@ class OnomatopoeiaMaterialDialog(QDialog):
         width, height = int(document.width() * 0.68), int(document.height() * 0.26)
         return [(document.width() - width) // 2, (document.height() - height) // 2, width, height], polygon
 
-    @staticmethod
-    def destination_parent(document):
+    def destination_parent(self, document):
         root = document.rootNode()
+        if self.fixed_parent_node:
+            pending = [root]
+            while pending:
+                candidate = pending.pop()
+                if candidate.uniqueId().toString() == self.fixed_parent_node:
+                    return candidate
+                pending.extend(candidate.childNodes())
         node = document.activeNode()
         while node and node != root:
             if node.type() == "grouplayer" and node.name().startswith("コマ"):
@@ -488,7 +503,11 @@ class OnomatopoeiaMaterialDialog(QDialog):
             bits = image.constBits(); bits.setsize(image.byteCount())
             layer.setPixelData(QByteArray(bytes(bits)), x, y, width, height)
             document.setActiveNode(layer); document.setModified(True); document.refreshProjection()
-            if self.remember.isChecked(): save_defaults(self.values())
+            if self.remember.isChecked():
+                remembered = self.values()
+                if remembered["target"] == "fixed_region":
+                    remembered["target"] = "selection"
+                save_defaults(remembered)
             self.accept()
         except Exception as error:
             QMessageBox.warning(self, "オノマトペ素材", str(error))

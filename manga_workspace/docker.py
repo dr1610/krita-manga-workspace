@@ -16,6 +16,7 @@ from . import comfy_backend
 from .compact import scroll_content
 from .prompt_edit import TagPromptEdit
 from .detection_ui import DetectionController
+from .onomatopoeia import OnomatopoeiaMaterialDialog
 from .theme import apply_panel_theme, section, muted
 
 
@@ -250,6 +251,10 @@ class MangaDocker(DockWidget):
         self.kind.currentIndexChanged.connect(self.edit_region)
         self.prompt.textChanged.connect(self.edit_region)
         self.region_negative.textChanged.connect(self.edit_region)
+        self.text_type.currentIndexChanged.connect(self.edit_region)
+        self.text_render.currentIndexChanged.connect(self.edit_region)
+        self.text_content.textChanged.connect(self.edit_region)
+        self.panel_owner.currentIndexChanged.connect(self.edit_region)
         self.scene.textChanged.connect(self.edit_scene)
         self.negative.textChanged.connect(self.edit_scene)
         self.scene.textChanged.connect(self.update_prompt_summaries)
@@ -385,6 +390,12 @@ class MangaDocker(DockWidget):
         placement_row.addWidget(object_button)
         self.buttons.append(object_button)
         layout.addLayout(placement_row)
+        text_button = QPushButton("③ 文字・オノマトペ領域を追加")
+        text_button.setToolTip(
+            "選択範囲を文字領域として追加し、台詞・オノマトペ・効果音などの分類と描画方法を設定します")
+        text_button.clicked.connect(lambda checked=False: self.add_from_selection("text"))
+        layout.addWidget(text_button)
+        self.buttons.append(text_button)
 
         layout.addWidget(section(QLabel("自動検出（任意）")))
         self.detector = DetectionController(self)
@@ -429,7 +440,7 @@ class MangaDocker(DockWidget):
 
         region_expanded = self.read_section_state("region_prompt", True)
         self.region_prompt_section = CollapsibleSection(
-            "選択した人物・物体のプロンプト", region_expanded,
+            "選択した領域の設定", region_expanded,
             lambda expanded: self.save_section_state("region_prompt", expanded))
         self.editor = QGroupBox()
         editor = QVBoxLayout(self.editor)
@@ -454,6 +465,27 @@ class MangaDocker(DockWidget):
         self.region_negative.setMaximumHeight(48)
         self.region_negative.setPlaceholderText("この人物・物体だけの除外プロンプト")
         editor.addWidget(self.region_negative)
+
+        self.text_options = QGroupBox("MANGA BRIDGE v2 文字領域")
+        text_options_layout = QVBoxLayout(self.text_options)
+        text_form = QFormLayout()
+        self.text_type = QComboBox()
+        self.text_type.addItems(("未分類", "台詞", "オノマトペ", "効果音", "モノローグ", "ナレーター"))
+        self.text_render = QComboBox()
+        self.text_render.addItems(("文字を描かず空間を確保", "吹き出しを残し文字は描かない", "指定した文字を描く"))
+        self.panel_owner = QComboBox()
+        text_form.addRow("テキストの種類", self.text_type)
+        text_form.addRow("描画方法", self.text_render)
+        text_form.addRow("所属コマ", self.panel_owner)
+        text_options_layout.addLayout(text_form)
+        self.text_content = QPlainTextEdit()
+        self.text_content.setMaximumHeight(58)
+        self.text_content.setPlaceholderText("文字の内容（例：ドン、ザワザワ、台詞本文）")
+        text_options_layout.addWidget(self.text_content)
+        self.create_lettering = QPushButton("この領域へオノマトペ素材を作成…")
+        self.create_lettering.clicked.connect(self.create_text_material)
+        text_options_layout.addWidget(self.create_lettering)
+        editor.addWidget(self.text_options)
         row = QHBoxLayout()
         self.position_update = self.button(row, "選択範囲で位置更新", self.move_region)
         self.button(row, "この範囲を選択", self.detector.guarded(self.detector.select))
@@ -896,6 +928,8 @@ class MangaDocker(DockWidget):
 
     def region_display_name(self, index, region):
         kind = REGION_KIND_LABELS.get(region.get("kind"), "領域")
+        if region.get("kind") == "text" and region.get("text_type", "未分類") != "未分類":
+            kind = region["text_type"]
         name = (region.get("name") or "").strip()
         return "%02d  %s%s" % (index + 1, kind, ("｜" + name) if name else "")
 
@@ -919,13 +953,26 @@ class MangaDocker(DockWidget):
         self.name.setText(region["name"] if region else "")
         self.prompt.setPlainText(region["prompt"] if region else "")
         self.region_negative.setPlainText(region["negative_prompt"] if region else "")
+        self.text_type.setCurrentText(region.get("text_type", "未分類") if region else "未分類")
+        self.text_render.setCurrentText(
+            region.get("text_render", "文字を描かず空間を確保") if region else "文字を描かず空間を確保")
+        self.text_content.setPlainText(region.get("text_content", "") if region else "")
+        self.refresh_panel_owners(region)
+        is_text = bool(region and region.get("kind") == "text")
+        self.text_options.setVisible(is_text)
+        self.create_lettering.setEnabled(is_text)
+        self.prompt.setPlaceholderText(
+            "この文字領域へのAI描画指示" if is_text else "この人物・物体に描きたい内容")
+        self.region_negative.setPlaceholderText(
+            "この文字領域だけの除外プロンプト" if is_text else "この人物・物体だけの除外プロンプト")
         if region:
             index = self.kind.findData(region["kind"])
             self.kind.setCurrentIndex(max(0, index))
             self.bounds.setText("位置：%s  範囲：%s" % (region.get("point"), region["bbox"]))
         else:
             self.bounds.clear()
-        for widget in (self.name, self.kind, self.prompt, self.region_negative, self.position_update):
+        for widget in (self.name, self.kind, self.prompt, self.region_negative, self.position_update,
+                       self.text_type, self.text_render, self.text_content, self.panel_owner):
             widget.setEnabled(region is not None)
         self._loading = False
         self.update_prompt_summaries()
@@ -966,6 +1013,11 @@ class MangaDocker(DockWidget):
             region["kind"] = self.kind.currentData()
             region["prompt"] = self.prompt.toPlainText()
             region["negative_prompt"] = self.region_negative.toPlainText()
+            region["text_type"] = self.text_type.currentText()
+            region["text_render"] = self.text_render.currentText()
+            region["text_content"] = self.text_content.toPlainText()
+            region["parent_panel_id"] = self.panel_owner.currentData()
+            self.text_options.setVisible(region["kind"] == "text")
             item = self.regions.currentItem()
             item.setText(self.region_display_name(self.regions.currentRow(), region))
             item.setForeground(QBrush(QColor(region_color(region))))
@@ -1031,17 +1083,64 @@ class MangaDocker(DockWidget):
         bounds = self.selection_bounds()
         if bounds:
             region = metadata.add_region(self._state, bounds)
-            region["kind"] = kind if kind in ("character", "object") else "character"
-            label = "人物" if region["kind"] == "character" else "物体"
+            region["kind"] = kind if kind in ("character", "object", "text") else "character"
+            label = {"character": "人物", "object": "物体", "text": "文字"}[region["kind"]]
             count = sum(1 for item in self._state["regions"] if item.get("kind") == region["kind"])
             region["name"] = "%s %d" % (label, count)
+            if region["kind"] == "text":
+                region["text_type"] = "オノマトペ"
+                region["text_render"] = "指定した文字を描く"
+                panel = self.current_panel()
+                region["parent_panel_id"] = panel.get("id") if panel else None
             self.refresh_region_items(len(self._state["regions"]) - 1)
             self.region_prompt_section.toggle.setChecked(True)
             self.persist()
             self.refresh_overlay()
             self.status.setText(
                 "選択範囲を%sの配置領域に追加しました。この領域に描きたい内容を入力してください。" % label)
-            QTimer.singleShot(0, self.prompt.setFocus)
+            QTimer.singleShot(0, self.text_content.setFocus if region["kind"] == "text" else self.prompt.setFocus)
+
+    def current_panel(self):
+        window = Krita.instance().activeWindow()
+        dock = next((item for item in window.dockers() if item.objectName() == "manga_panels"), None) if window else None
+        return dock.current() if dock and getattr(dock, "document", None) == self._document else None
+
+    def refresh_panel_owners(self, region=None):
+        selected = region.get("parent_panel_id") if region else None
+        self.panel_owner.blockSignals(True)
+        self.panel_owner.clear()
+        self.panel_owner.addItem("所属なし", None)
+        window = Krita.instance().activeWindow()
+        dock = next((item for item in window.dockers() if item.objectName() == "manga_panels"), None) if window else None
+        panels = dock.active_panels() if dock and getattr(dock, "document", None) == self._document else []
+        for index, panel in enumerate(panels):
+            self.panel_owner.addItem("コマ %02d" % (index + 1), panel.get("id"))
+        owner_index = self.panel_owner.findData(selected)
+        self.panel_owner.setCurrentIndex(max(0, owner_index))
+        self.panel_owner.blockSignals(False)
+
+    def create_text_material(self):
+        region = self.current()
+        if not region or region.get("kind") != "text":
+            QMessageBox.information(self, "文字領域", "文字・オノマトペ領域を選択してください。")
+            return
+        text = region.get("text_content", "").strip()
+        parent_node = None
+        owner_id = region.get("parent_panel_id")
+        window = Krita.instance().activeWindow()
+        panel_dock = next((item for item in window.dockers() if item.objectName() == "manga_panels"), None) if window else None
+        if panel_dock and getattr(panel_dock, "document", None) == self._document:
+            owner = next((panel for panel in panel_dock.active_panels() if panel.get("id") == owner_id), None)
+            parent_node = owner.get("node") if owner else None
+        dialog = OnomatopoeiaMaterialDialog(
+            self.window(), initial_text=text, fixed_bounds=list(region["bbox"]),
+            fixed_parent_node=parent_node)
+        if dialog.exec_():
+            region["text_content"] = dialog.text.text().strip()
+            region["text_type"] = "オノマトペ"
+            region["text_render"] = "指定した文字を描く"
+            self.select_region(self.regions.currentRow())
+            self.persist()
 
     def move_region(self):
         region = self.current()
@@ -1088,6 +1187,14 @@ class MangaDocker(DockWidget):
             rx, ry, rw, rh = region["bbox"]
             intersects = min(x + width, rx + rw) > max(x, rx) and min(y + height, ry + rh) > max(y, ry)
             text = region.get("prompt", "").strip()
+            if region.get("kind") == "text":
+                instruction = "%s。%s" % (
+                    region.get("text_type", "未分類"),
+                    region.get("text_render", "文字を描かず空間を確保"))
+                content = region.get("text_content", "").strip()
+                if content and region.get("text_render") == "指定した文字を描く":
+                    instruction += "。文字内容：" + content
+                text = "、".join(part for part in (instruction, text) if part)
             if not intersects or not text:
                 continue
             named = "%s: %s" % (region.get("name") or region.get("kind"), text)

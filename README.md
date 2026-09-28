@@ -2,7 +2,7 @@
 
 Kritaへページ管理、漫画原稿設定、コマ割り、レイヤー連動、範囲別プロンプトと任意のローカルAI作画を追加する、無料公開の試作プラグインです。
 
-> **0.2.1-alpha**：重要な原稿はバックアップを取ってから使用してください。
+> **0.3.0-alpha**：重要な原稿はバックアップを取ってから使用してください。
 
 ## 主な機能
 
@@ -15,11 +15,12 @@ Kritaへページ管理、漫画原稿設定、コマ割り、レイヤー連動
 - ローカルComfyUIによる任意のAIプレビュー
 - 人物・文字・コマの任意のローカル自動検出（Windows x64）
 - オノマトペのプリセット、縁取り、変形、縦書き、集中線と素材レイヤー生成
+- MANGA BRIDGE v2形式の文字領域、分類、描画方法、所属コマ、AI指示連携
 - 起動後の更新通知、手動確認、検証付き更新ボタン
 
 ## インストール
 
-1. [Releases](https://github.com/dr1610/krita-manga-workspace/releases)から `manga-workspace-0.2.1-alpha.zip` を取得します。
+1. [Releases](https://github.com/dr1610/krita-manga-workspace/releases)から `manga-workspace-0.3.0-alpha.zip` を取得します。
 2. Kritaの「ツール → スクリプト → Pythonプラグインをインポート」でZIPを選択します。
 3. Kritaを再起動します。
 4. 「設定 → Kritaを設定 → Pythonプラグインマネージャー」で「漫画ワークスペース（試作版）」を有効にします。

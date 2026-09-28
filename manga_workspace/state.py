@@ -38,6 +38,10 @@ def normalize(state):
         region.setdefault("negative_prompt", "")
         region.setdefault("position_mode", "custom")
         region.setdefault("point", None)
+        region.setdefault("text_type", "未分類")
+        region.setdefault("text_render", "文字を描かず空間を確保")
+        region.setdefault("text_content", "")
+        region.setdefault("parent_panel_id", None)
     return state
 
 
@@ -83,8 +87,15 @@ def validate(state):
         ids.add(rid)
         bbox(region.get("bbox"))
         if any(not isinstance(region.get(key), str) for key in
-               ("name", "prompt", "negative_prompt", "kind", "position_mode")):
+               ("name", "prompt", "negative_prompt", "kind", "position_mode",
+                "text_type", "text_render", "text_content")):
             raise ValueError("配置名またはPromptが不正です")
+        if region["text_type"] not in ("未分類", "台詞", "オノマトペ", "効果音", "モノローグ", "ナレーター"):
+            raise ValueError("テキスト分類が不正です")
+        if region["text_render"] not in ("文字を描かず空間を確保", "吹き出しを残し文字は描かない", "指定した文字を描く"):
+            raise ValueError("文字の描画方法が不正です")
+        if region.get("parent_panel_id") is not None and not isinstance(region["parent_panel_id"], str):
+            raise ValueError("所属コマIDが不正です")
         point = region.get("point")
         if point is not None and (not isinstance(point, list) or len(point) != 2 or
                                   any(type(v) not in (int, float) or not math.isfinite(v) for v in point)):
@@ -105,6 +116,8 @@ def add_region(state, bounds):
               "prompt": "", "negative_prompt": "", "kind": "character",
               "position_mode": "custom", "point": [bounds[0] + bounds[2] / 2,
                                                        bounds[1] + bounds[3] / 2],
-              "bbox": list(bbox(bounds)), "parent_panel_id": None}
+              "bbox": list(bbox(bounds)), "parent_panel_id": None,
+              "text_type": "未分類", "text_render": "文字を描かず空間を確保",
+              "text_content": ""}
     state["regions"].append(region)
     return region
