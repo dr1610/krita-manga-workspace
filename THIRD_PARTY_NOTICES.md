@@ -29,3 +29,6 @@ ComfyUI, image-generation checkpoints, VAE, text encoders, LoRA and Custom Nodes
 ## Fonts
 
 The optional font collection under the development repository's `resources/fonts` is not included in the core prototype ZIP. If distributed separately, every font must retain its SIL Open Font License text.
+## Linked external material sites
+
+The plugin can open the DDD FONT website and import image files explicitly selected by the user. DDD FONT assets are not bundled, mirrored, scraped, or downloaded by this plugin. Users are responsible for reviewing and following the material provider's terms before importing or distributing a work that uses those assets.

@@ -1,16 +1,17 @@
 """Onomatopoeia material generator for the manga workspace."""
 import math
+from pathlib import Path
 from krita import Krita
-from PyQt5.QtCore import QByteArray, Qt, QSize, QRectF, QPointF, pyqtSignal
+from PyQt5.QtCore import QByteArray, Qt, QSize, QRectF, QPointF, QUrl, pyqtSignal
 from PyQt5.QtGui import (
-    QColor, QFont, QFontDatabase, QIcon, QImage, QPainter, QPainterPath,
+    QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QImage, QPainter, QPainterPath,
     QPen, QPixmap, QPolygonF, QTransform,
 )
 from PyQt5.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFontComboBox, QFormLayout, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
-    QToolButton, QWidget, QScrollArea, QSizePolicy,
+    QToolButton, QWidget, QScrollArea, QSizePolicy, QFileDialog,
 )
 
 
@@ -159,6 +160,61 @@ def render_material(text, values, width, height):
     painter.drawPath(path)
     painter.end()
     return image
+
+
+def load_external_material(path, maximum=4096):
+    """Load a user-selected raster/SVG without downloading or bundling assets."""
+    suffix = Path(path).suffix.lower()
+    if suffix == ".svg":
+        try:
+            from PyQt5.QtSvg import QSvgRenderer
+        except ImportError as error:
+            raise ValueError("このKrita環境ではSVG読込機能を利用できません。PNGを使用してください。") from error
+        renderer = QSvgRenderer(path)
+        if not renderer.isValid():
+            raise ValueError("SVG素材を読み込めませんでした")
+        size = renderer.defaultSize()
+        width, height = max(1, size.width()), max(1, size.height())
+        scale = min(1.0, float(maximum) / max(width, height))
+        image = QImage(max(1, int(width * scale)), max(1, int(height * scale)), QImage.Format_ARGB32)
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        renderer.render(painter)
+        painter.end()
+        return image
+    image = QImage(path)
+    if image.isNull():
+        raise ValueError("画像素材を読み込めませんでした")
+    if max(image.width(), image.height()) > maximum:
+        image = image.scaled(maximum, maximum, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return image.convertToFormat(QImage.Format_ARGB32)
+
+
+def fit_external_material(source, width, height):
+    target = QImage(max(1, int(width)), max(1, int(height)), QImage.Format_ARGB32)
+    target.fill(Qt.transparent)
+    scaled = source.scaled(target.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    painter = QPainter(target)
+    painter.drawImage((target.width() - scaled.width()) // 2,
+                      (target.height() - scaled.height()) // 2, scaled)
+    painter.end()
+    return target
+
+
+def apply_polygon_mask(image, polygon, offset_x, offset_y):
+    if not polygon:
+        return
+    mask = QImage(image.width(), image.height(), QImage.Format_ARGB32)
+    mask.fill(Qt.transparent)
+    painter = QPainter(mask)
+    painter.setBrush(Qt.white)
+    painter.setPen(Qt.NoPen)
+    painter.drawPolygon(QPolygonF([QPointF(px - offset_x, py - offset_y) for px, py in polygon]))
+    painter.end()
+    painter = QPainter(image)
+    painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+    painter.drawImage(0, 0, mask)
+    painter.end()
 
 
 class ColorButton(QPushButton):
@@ -362,6 +418,23 @@ class OnomatopoeiaMaterialDialog(QDialog):
 
         self.remember = QCheckBox("今回の設定を既定値にする")
         outer.addWidget(self.remember)
+        library_row = QHBoxLayout()
+        self.open_ddd = QPushButton("DDD FONTを開く ↗")
+        self.open_ddd.setToolTip("配布元サイトをブラウザで開きます。素材は拡張機能へ同梱・自動取得しません。")
+        self.open_ddd.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://dddfont.com/")))
+        library_row.addWidget(self.open_ddd)
+        self.import_material_button = QPushButton("取得済みPNG・JPG・SVGを読み込む…")
+        self.import_material_button.setToolTip(
+            "自分で利用条件を確認して取得した画像素材を、現在の配置先へ透明レイヤーとして追加します")
+        self.import_material_button.clicked.connect(self.import_external_material)
+        library_row.addWidget(self.import_material_button, 1)
+        outer.addLayout(library_row)
+        license_note = QLabel(
+            "外部素材は同梱・自動取得しません。利用数、改変、商用利用などは各配布元の条件を確認してください。")
+        license_note.setWordWrap(True)
+        license_note.setStyleSheet("color:palette(mid);font-size:11px")
+        outer.addWidget(license_note)
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         self.generate = QPushButton("原稿に素材レイヤーを作成")
         self.generate.setMinimumHeight(40)
@@ -488,21 +561,8 @@ class OnomatopoeiaMaterialDialog(QDialog):
             bounds, polygon = self.target_geometry(document)
             x, y, width, height = bounds
             image = render_material(text, self.values(), width, height)
-            if polygon:
-                mask = QImage(width, height, QImage.Format_ARGB32)
-                mask.fill(Qt.transparent)
-                painter = QPainter(mask)
-                painter.setBrush(Qt.white); painter.setPen(Qt.NoPen)
-                painter.drawPolygon(QPolygonF([QPointF(px - x, py - y) for px, py in polygon]))
-                painter.end()
-                painter = QPainter(image)
-                painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-                painter.drawImage(0, 0, mask); painter.end()
-            layer = document.createNode("オノマトペ：" + text[:24], "paintlayer")
-            self.destination_parent(document).addChildNode(layer, None)
-            bits = image.constBits(); bits.setsize(image.byteCount())
-            layer.setPixelData(QByteArray(bytes(bits)), x, y, width, height)
-            document.setActiveNode(layer); document.setModified(True); document.refreshProjection()
+            apply_polygon_mask(image, polygon, x, y)
+            self.place_image(document, image, bounds, "オノマトペ：" + text[:24])
             if self.remember.isChecked():
                 remembered = self.values()
                 if remembered["target"] == "fixed_region":
@@ -511,3 +571,33 @@ class OnomatopoeiaMaterialDialog(QDialog):
             self.accept()
         except Exception as error:
             QMessageBox.warning(self, "オノマトペ素材", str(error))
+
+    def import_external_material(self):
+        document = Krita.instance().activeDocument()
+        if not document:
+            QMessageBox.information(self, "画像素材を読み込む", "原稿を開いてください")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "取得済みの画像素材を選択", "", "画像素材 (*.png *.jpg *.jpeg *.svg)")
+        if not path:
+            return
+        try:
+            bounds, polygon = self.target_geometry(document)
+            x, y, width, height = bounds
+            image = fit_external_material(load_external_material(path), width, height)
+            apply_polygon_mask(image, polygon, x, y)
+            self.place_image(document, image, bounds, "画像素材：" + Path(path).stem[:32])
+            self.accept()
+        except Exception as error:
+            QMessageBox.warning(self, "画像素材を読み込む", str(error))
+
+    def place_image(self, document, image, bounds, layer_name):
+        x, y, width, height = [int(round(value)) for value in bounds]
+        layer = document.createNode(layer_name, "paintlayer")
+        self.destination_parent(document).addChildNode(layer, None)
+        bits = image.constBits()
+        bits.setsize(image.byteCount())
+        layer.setPixelData(QByteArray(bytes(bits)), x, y, width, height)
+        document.setActiveNode(layer)
+        document.setModified(True)
+        document.refreshProjection()
