@@ -2,7 +2,7 @@
 
 Kritaへページ管理、漫画原稿設定、コマ割り、レイヤー連動、範囲別プロンプトと任意のローカルAI作画を追加する、無料公開の試作プラグインです。
 
-> **0.1.1-alpha**：重要な原稿はバックアップを取ってから使用してください。
+> **0.2.0-alpha**：重要な原稿はバックアップを取ってから使用してください。
 
 ## 主な機能
 
@@ -14,14 +14,22 @@ Kritaへページ管理、漫画原稿設定、コマ割り、レイヤー連動
 - 日本語入力とDanbooru TagComplete
 - ローカルComfyUIによる任意のAIプレビュー
 - 人物・文字・コマの任意のローカル自動検出（Windows x64）
+- オノマトペのプリセット、縁取り、変形、縦書き、集中線と素材レイヤー生成
+- 起動後の更新通知、手動確認、検証付き更新ボタン
 
 ## インストール
 
-1. [Releases](https://github.com/dr1610/krita-manga-workspace/releases)から `manga-workspace-0.1.1-alpha.zip` を取得します。
+1. [Releases](https://github.com/dr1610/krita-manga-workspace/releases)から `manga-workspace-0.2.0-alpha.zip` を取得します。
 2. Kritaの「ツール → スクリプト → Pythonプラグインをインポート」でZIPを選択します。
 3. Kritaを再起動します。
 4. 「設定 → Kritaを設定 → Pythonプラグインマネージャー」で「漫画ワークスペース（試作版）」を有効にします。
 5. Kritaをもう一度再起動します。
+
+## 更新
+
+`0.2.0-alpha` 以降は、起動後にGitHub Releaseを確認します。新しい版があると「ページ管理」メニューの「拡張機能の更新…」へ印が付きます。同じ画面の「更新を適用」でZIPを取得し、GitHubが公開するSHA-256を検証してから配置します。反映にはKritaの再起動が必要です。更新前の版はKrita設定フォルダ内の `manga_workspace_backups` へ保存します。
+
+`0.1.1-alpha` 以前には更新機能がないため、`0.2.0-alpha` だけは上記の手順で手動導入してください。
 
 Krita公式の導入説明：https://docs.krita.org/en/user_manual/python_scripting/install_custom_python_plugin.html
 
@@ -31,6 +39,7 @@ Krita公式の導入説明：https://docs.krita.org/en/user_manual/python_script
 
 - AI生成：利用者が用意したローカルComfyUIへ接続します。
 - 自動検出：利用者が画面上で導入を選んだ場合だけ、専用Pythonと約250 MBの検出モデルを取得します。
+- 更新確認：起動後にGitHubの公開Release情報だけを取得します。原稿画像やPromptは送信しません。
 - 原稿画像やPromptを、このプラグイン独自の外部サービスへ送信する処理はありません。
 
 ## 既知の制約

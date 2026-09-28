@@ -1,8 +1,10 @@
 from krita import Extension, Krita
-from PyQt5.QtCore import Qt, QTimer, QByteArray, QEvent, QPoint
-from PyQt5.QtWidgets import QMenu, QToolBar, QApplication, QAbstractButton
+from PyQt5.QtCore import Qt, QTimer, QByteArray, QEvent, QPoint, QSize
+from PyQt5.QtWidgets import QMenu, QToolBar, QApplication, QAbstractButton, QStyle
 from PyQt5.QtWidgets import QAction
 from .compact import CompactScroll, scroll_content
+from .onomatopoeia import OnomatopoeiaMaterialDialog, OnomatopoeiaSettingsDialog, make_icon
+from .updater import UpdateDialog, UpdateManager
 
 
 class WorkspaceExtension(Extension):
@@ -10,6 +12,7 @@ class WorkspaceExtension(Extension):
         super().__init__(parent)
         self._tool_press = {}
         self._tool_dragging = None
+        self._update_managers = {}
 
     def setup(self):
         pass
@@ -67,8 +70,23 @@ class WorkspaceExtension(Extension):
                                      self.place_panel_dock(main, a))
         menu.addAction("この配置を保存", lambda: self.save_layout(main))
         menu.addAction("保存した配置に戻す", lambda: self.restore_layout(main))
+        sound_menu = main.menuBar().addMenu("オノマトペ")
+        sound_menu.setObjectName("manga_onomatopoeia_menu")
+        sound_menu.addAction(make_icon(), "オノマトペ素材を作成…",
+                             lambda checked=False, m=main: self.open_onomatopoeia_material(m))
+        sound_menu.addAction("オノマトペ設定…",
+                             lambda checked=False, m=main: self.open_onomatopoeia_settings(m))
+        menu.addSeparator()
+        update_action = menu.addAction("拡張機能の更新…")
+        manager = UpdateManager(main)
+        self._update_managers[id(main)] = manager
+        update_action.triggered.connect(lambda checked=False, m=main, u=manager: UpdateDialog(u, m).exec_())
+        manager.available.connect(lambda release, m=main, a=update_action:
+                                  self.update_available(m, a, release))
+        QTimer.singleShot(7000, manager.check)
         self.install_history_buttons(main)
         self.install_toolbox_drag(main, window)
+        self.install_onomatopoeia_tool(main)
         bar = QToolBar("漫画制作", main)
         bar.setObjectName("manga_workspace_toolbar")
         bar.addAction("漫画作画", lambda: self.with_window(main, self.show_manga))
@@ -93,6 +111,36 @@ class WorkspaceExtension(Extension):
         # startup timer can re-enter Qt/Python callbacks and crash Krita.
         # Keep the restored Krita workspace untouched at startup.  Users can
         # explicitly apply or restore the manga layout from the menu.
+
+    def install_onomatopoeia_tool(self, main):
+        """Add a stable vertical tool beside Krita's native left toolbox."""
+        if main.findChild(QToolBar, "manga_onomatopoeia_toolbar"):
+            return
+        toolbar = QToolBar("オノマトペ", main)
+        toolbar.setObjectName("manga_onomatopoeia_toolbar")
+        toolbar.setOrientation(Qt.Vertical)
+        toolbar.setIconSize(QSize(30, 30))
+        toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        action = toolbar.addAction(make_icon(32), "オノマトペ素材")
+        action.setToolTip("オノマトペ素材を作成")
+        action.triggered.connect(lambda checked=False, m=main: self.open_onomatopoeia_material(m))
+        main.addToolBar(Qt.LeftToolBarArea, toolbar)
+        toolbar.show()
+
+    @staticmethod
+    def open_onomatopoeia_material(main):
+        OnomatopoeiaMaterialDialog(main).exec_()
+
+    @staticmethod
+    def open_onomatopoeia_settings(main):
+        OnomatopoeiaSettingsDialog(main).exec_()
+
+    @staticmethod
+    def update_available(main, action, release):
+        tag = str(release.get("tag_name", "")).lstrip("v")
+        action.setText("● 更新あり：" + tag + "…")
+        action.setIcon(main.style().standardIcon(QStyle.SP_BrowserReload))
+        main.statusBar().showMessage("漫画ワークスペースの更新があります：" + tag, 15000)
 
     def install_toolbox_drag(self, main, window):
         """A normal click selects a tool; dragging pulls out Tool Options."""
