@@ -16,6 +16,11 @@ from PyQt5.QtWidgets import (
 
 
 SECTION = "manga_workspace_onomatopoeia"
+EXTERNAL_MATERIAL_SITES = (
+    ("DDD FONT（擬音・効果音）", "https://dddfont.com/", "https://dddfont.com/term/"),
+    ("マンガパーツSTOCK（集中線・効果線）", "https://mangasozai.com/", "https://mangasozai.com/terms"),
+    ("フキダシデザイン（吹き出し）", "https://fukidesign.com/", "https://fukidesign.com/terms/"),
+)
 PRESETS = {
     "衝撃": {"bold": True, "outline": 10.0, "slant": -0.10, "angle": -4.0,
              "shadow": True, "burst": True},
@@ -419,17 +424,26 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.remember = QCheckBox("今回の設定を既定値にする")
         outer.addWidget(self.remember)
         library_row = QHBoxLayout()
-        self.open_ddd = QPushButton("DDD FONTを開く ↗")
-        self.open_ddd.setToolTip("配布元サイトをブラウザで開きます。素材は拡張機能へ同梱・自動取得しません。")
-        self.open_ddd.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl("https://dddfont.com/")))
-        library_row.addWidget(self.open_ddd)
+        self.material_site = QComboBox()
+        for title, url, terms in EXTERNAL_MATERIAL_SITES:
+            self.material_site.addItem(title, url)
+        self.material_site.setToolTip("外部素材は各公式サイトから利用者自身で取得します")
+        library_row.addWidget(self.material_site, 1)
+        self.open_material_site_button = QPushButton("配布元を開く ↗")
+        self.open_material_site_button.clicked.connect(self.open_material_site)
+        library_row.addWidget(self.open_material_site_button)
+        self.open_material_terms_button = QPushButton("利用条件")
+        self.open_material_terms_button.clicked.connect(self.open_material_terms)
+        library_row.addWidget(self.open_material_terms_button)
+        self.material_site.currentIndexChanged.connect(self.update_material_site_actions)
+        outer.addLayout(library_row)
+        import_row = QHBoxLayout()
         self.import_material_button = QPushButton("取得済みPNG・JPG・SVGを読み込む…")
         self.import_material_button.setToolTip(
             "自分で利用条件を確認して取得した画像素材を、現在の配置先へ透明レイヤーとして追加します")
         self.import_material_button.clicked.connect(self.import_external_material)
-        library_row.addWidget(self.import_material_button, 1)
-        outer.addLayout(library_row)
+        import_row.addWidget(self.import_material_button, 1)
+        outer.addLayout(import_row)
         license_note = QLabel(
             "外部素材は同梱・自動取得しません。利用数、改変、商用利用などは各配布元の条件を確認してください。")
         license_note.setWordWrap(True)
@@ -456,6 +470,7 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.burst.toggled.connect(self.update_preview)
         self.target.currentIndexChanged.connect(self.update_target_hint)
         self.refresh_preset_icons(sample_words)
+        self.update_material_site_actions()
         self.update_target_hint()
         self.update_preview()
 
@@ -494,6 +509,25 @@ class OnomatopoeiaMaterialDialog(QDialog):
             "fixed_region": "MANGA BRIDGE v2形式で登録した文字領域へ正確に配置します。",
         }
         self.target_hint.setText(hints.get(self.target.currentData(), ""))
+
+    def selected_material_site(self):
+        index = self.material_site.currentIndex()
+        return EXTERNAL_MATERIAL_SITES[index] if 0 <= index < len(EXTERNAL_MATERIAL_SITES) else ("", "", "")
+
+    def update_material_site_actions(self, *args):
+        title, url, terms = self.selected_material_site()
+        self.open_material_site_button.setEnabled(bool(url))
+        self.open_material_terms_button.setEnabled(bool(terms))
+        self.open_material_site_button.setToolTip(title + "をブラウザで開きます")
+        self.open_material_terms_button.setToolTip("選択した配布元の利用条件を開きます")
+
+    def open_material_site(self):
+        QDesktopServices.openUrl(QUrl(self.selected_material_site()[1]))
+
+    def open_material_terms(self):
+        terms = self.selected_material_site()[2]
+        if terms:
+            QDesktopServices.openUrl(QUrl(terms))
 
     def update_preview(self, *args):
         text = self.text.text().strip() or "オノマトペ"
