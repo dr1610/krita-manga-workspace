@@ -1,7 +1,7 @@
 <!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><title>漫画ワークスペース 0.2.0-alpha</title>
+<html lang="ja"><head><meta charset="utf-8"><title>漫画ワークスペース 0.2.1-alpha</title>
 <style>body{font-family:sans-serif;line-height:1.7;max-width:960px;margin:24px auto;padding:0 20px;color:#20252a}h1,h2{color:#174b69}code,pre{background:#eef3f6;padding:.15em .35em}pre{padding:12px;white-space:pre-wrap}table{border-collapse:collapse;width:100%}th,td{border:1px solid #9aaab4;padding:6px;text-align:left}.warn{border-left:5px solid #d88b22;padding:8px 12px;background:#fff7e8}</style></head><body>
-<h1>漫画ワークスペース 無料公開試作版 0.2.0-alpha</h1>
+<h1>漫画ワークスペース 無料公開試作版 0.2.1-alpha</h1>
 <div class="warn"><strong>試作版：</strong>重要な原稿はバックアップを取ってから使用してください。漫画制作機能はKritaだけで動作します。AI生成には別途ComfyUIが必要です。自動検出は利用者が明示的に導入した場合だけ外部ファイルを取得します。</div>
 <p>Krita標準の描画・レイヤー機能に、ページ管理、漫画原稿設定、コマ割り、Anima AIプレビューを追加します。プラグインを有効・無効にした後はKritaを再起動してください。</p>
 
@@ -9,7 +9,7 @@
 <ol><li>「ファイル → 新しいドキュメント → 寸法 → 定義済み」から漫画規格を選びます。</li><li>ページ管理の「漫画原稿設定…」で仕上がり、裁ち落とし、基本枠、枠線幅、コマ間隔を適用します。</li><li>初回に作られる大ゴマを「枠を分割 → 操作開始」で分割します。線はコマの外から反対側の外まで引きます。</li><li>コマ一覧でコマを選び「このコマに描く」で作画します。</li><li>AIを使うときは上部「AI作画」を選び、右ドックでPromptを設定します。</li></ol>
 
 <h2>オノマトペ素材</h2>
-<p>メニューバーの「オノマトペ → オノマトペ素材を作成…」、または左側の「ド」アイコンから素材画面を開きます。文字、プリセット、フォント、文字色、縁取り、傾き、回転、太字、縦書き、影、集中線を設定し、透明な新規レイヤーとして作成します。</p>
+<p>メニューバーの「オノマトペ → オノマトペ素材を作成…」、または左側の「ド」アイコンから素材画面を開きます。上部のライブプレビューとスタイルカードで仕上がりを確認し、折り畳み式の「文字と縁取り」「変形と効果」「配置」で調整します。透明な新規レイヤーとして作成します。</p>
 <ol><li>Kritaの矩形選択で配置範囲を指定するか、コマ一覧で配置先のコマを選びます。</li><li>素材画面で文字と見た目を設定し、プレビューを確認します。</li><li>配置先を「選択範囲」「現在のコマ」「ページ中央」から選びます。</li><li>「素材レイヤーを作成」を押します。現在のレイヤーがコマGroup内なら、そのコマGroupへ追加します。</li></ol>
 <p>既定のプリセット、フォント、色、配置先は「オノマトペ → オノマトペ設定…」で変更できます。生成処理はローカルで行い、入力文字や原稿画像を外部へ送信しません。</p>
 

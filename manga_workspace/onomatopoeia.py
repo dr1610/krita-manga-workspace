@@ -1,7 +1,7 @@
 """Onomatopoeia material generator for the manga workspace."""
 import math
 from krita import Krita
-from PyQt5.QtCore import QByteArray, Qt, QSize, QRectF, QPointF
+from PyQt5.QtCore import QByteArray, Qt, QSize, QRectF, QPointF, pyqtSignal
 from PyQt5.QtGui import (
     QColor, QFont, QFontDatabase, QIcon, QImage, QPainter, QPainterPath,
     QPen, QPixmap, QPolygonF, QTransform,
@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFontComboBox, QFormLayout, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
+    QToolButton, QWidget, QScrollArea, QSizePolicy,
 )
 
 
@@ -161,6 +162,8 @@ def render_material(text, values, width, height):
 
 
 class ColorButton(QPushButton):
+    colorChanged = pyqtSignal(QColor)
+
     def __init__(self, color, parent=None):
         super().__init__(parent)
         self.color = QColor(color)
@@ -172,11 +175,39 @@ class ColorButton(QPushButton):
         if selected.isValid():
             self.color = selected
             self.update_label()
+            self.colorChanged.emit(self.color)
 
     def update_label(self):
         self.setText(self.color.name())
         contrast = "#ffffff" if self.color.lightness() < 120 else "#111111"
         self.setStyleSheet("background:%s;color:%s" % (self.color.name(), contrast))
+
+
+class CollapsibleSection(QWidget):
+    """Compact native-looking section that works in narrow Krita windows."""
+    def __init__(self, title, content_layout, expanded=False, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self.toggle = QToolButton()
+        self.toggle.setText(title)
+        self.toggle.setCheckable(True)
+        self.toggle.setChecked(expanded)
+        self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.toggle.setStyleSheet("QToolButton{text-align:left;padding:6px;font-weight:600}")
+        self.content = QWidget()
+        self.content.setLayout(content_layout)
+        self.content.setVisible(expanded)
+        self.toggle.toggled.connect(self.set_expanded)
+        layout.addWidget(self.toggle)
+        layout.addWidget(self.content)
+
+    def set_expanded(self, expanded):
+        self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.content.setVisible(expanded)
 
 
 class OnomatopoeiaSettingsDialog(QDialog):
@@ -222,20 +253,69 @@ class OnomatopoeiaMaterialDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("オノマトペ素材")
-        self.setMinimumWidth(560)
+        self.setMinimumSize(760, 680)
+        self.resize(860, 760)
         values = load_defaults()
+        self.current_preset = values["preset"] if values["preset"] in PRESETS else "衝撃"
+        self.preset_buttons = {}
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(8)
+
+        title = QLabel("オノマトペ素材を作成")
+        title.setStyleSheet("font-size:18px;font-weight:700")
+        subtitle = QLabel("文字とスタイルを選び、原稿上へ透明な素材レイヤーとして配置します。")
+        subtitle.setStyleSheet("color:palette(mid)")
+        outer.addWidget(title)
+        outer.addWidget(subtitle)
+
+        self.preview = QLabel()
+        self.preview.setMinimumHeight(230)
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setStyleSheet(
+            "QLabel{background:palette(base);border:1px solid palette(mid);border-radius:5px;padding:8px}")
+        outer.addWidget(self.preview, 1)
+
+        entry = QHBoxLayout()
+        entry.addWidget(QLabel("文字"))
         self.text = QLineEdit("ドン")
         self.text.setPlaceholderText("例：ドン、ザワザワ、キラッ")
-        outer.addWidget(QLabel("オノマトペ")); outer.addWidget(self.text)
+        self.text.setMinimumHeight(34)
+        self.text.setClearButtonEnabled(True)
+        entry.addWidget(self.text, 1)
+        outer.addLayout(entry)
         quick = QHBoxLayout()
         for word in ("ドン", "バン", "ゴゴゴ", "ザワザワ", "キラッ", "シーン"):
-            button = QPushButton(word); button.clicked.connect(lambda checked=False, value=word: self.text.setText(value))
+            button = QPushButton(word)
+            button.setFlat(True)
+            button.clicked.connect(lambda checked=False, value=word: self.text.setText(value))
             quick.addWidget(button)
+        quick.addStretch(1)
         outer.addLayout(quick)
 
-        form = QFormLayout()
-        self.preset = QComboBox(); self.preset.addItems(PRESETS); self.preset.setCurrentText(values["preset"])
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        style_column = QVBoxLayout()
+        style_column.addWidget(QLabel("スタイル"))
+        preset_grid = QGridLayout()
+        preset_grid.setSpacing(6)
+        sample_words = {"衝撃": "ドン", "速度": "シュッ", "不穏": "ゴゴゴ", "小声": "ひそ…", "可愛い": "キラッ"}
+        for index, name in enumerate(PRESETS):
+            button = QToolButton()
+            button.setText(name)
+            button.setCheckable(True)
+            button.setChecked(name == self.current_preset)
+            button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            button.setIconSize(QSize(132, 64))
+            button.setMinimumSize(150, 94)
+            button.clicked.connect(lambda checked=False, value=name: self.select_preset(value))
+            self.preset_buttons[name] = button
+            preset_grid.addWidget(button, index // 2, index % 2)
+        style_column.addLayout(preset_grid)
+        style_column.addStretch(1)
+        body.addLayout(style_column, 1)
+
+        option_column = QVBoxLayout()
         self.font = QFontComboBox(); self.font.setCurrentFont(QFont(values["font"]))
         self.fill = ColorButton(values["fill"]); self.outline_color = ColorButton(values["outline_color"])
         self.outline = QDoubleSpinBox(); self.outline.setRange(0, 60); self.outline.setValue(values["outline"]); self.outline.setSuffix(" px")
@@ -249,43 +329,91 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.burst = QCheckBox("集中線"); self.burst.setChecked(values["burst"])
         effects = QHBoxLayout()
         for widget in (self.bold, self.vertical, self.shadow, self.burst): effects.addWidget(widget)
-        form.addRow("プリセット", self.preset); form.addRow("フォント", self.font)
-        form.addRow("文字色", self.fill); form.addRow("縁取り色", self.outline_color)
-        form.addRow("縁取り幅", self.outline); form.addRow("傾き", self.slant)
-        form.addRow("回転", self.angle); form.addRow("効果", effects); form.addRow("配置先", self.target)
-        outer.addLayout(form)
-        self.preview = QLabel(); self.preview.setMinimumSize(520, 220); self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setStyleSheet("background:#d0d0d0;border:1px solid #777")
-        outer.addWidget(self.preview)
+
+        text_form = QFormLayout()
+        text_form.addRow("フォント", self.font)
+        text_form.addRow("文字色", self.fill)
+        text_form.addRow("縁取り色", self.outline_color)
+        text_form.addRow("縁取り幅", self.outline)
+        option_column.addWidget(CollapsibleSection("文字と縁取り", text_form, True))
+
+        transform_form = QFormLayout()
+        transform_form.addRow("傾き", self.slant)
+        transform_form.addRow("回転", self.angle)
+        transform_form.addRow("効果", effects)
+        option_column.addWidget(CollapsibleSection("変形と効果", transform_form, False))
+
+        placement_form = QFormLayout()
+        placement_form.addRow("配置先", self.target)
+        self.target_hint = QLabel()
+        self.target_hint.setWordWrap(True)
+        self.target_hint.setStyleSheet("color:palette(mid)")
+        placement_form.addRow("", self.target_hint)
+        option_column.addWidget(CollapsibleSection("配置", placement_form, True))
+        option_column.addStretch(1)
+        body.addLayout(option_column, 1)
+        outer.addLayout(body)
+
         self.remember = QCheckBox("今回の設定を既定値にする")
         outer.addWidget(self.remember)
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.generate = QPushButton("素材レイヤーを作成")
+        self.generate = QPushButton("原稿に素材レイヤーを作成")
+        self.generate.setMinimumHeight(40)
+        self.generate.setDefault(True)
+        self.generate.setStyleSheet("QPushButton{font-weight:700;padding:8px 20px}")
         buttons.addButton(self.generate, QDialogButtonBox.AcceptRole)
         buttons.rejected.connect(self.reject); self.generate.clicked.connect(self.create_layer)
         outer.addWidget(buttons)
-        self.preset.currentTextChanged.connect(self.apply_preset)
         self.text.textChanged.connect(self.update_preview)
-        for widget in (self.font, self.fill, self.outline_color, self.outline, self.slant, self.angle,
-                       self.bold, self.vertical, self.shadow, self.burst):
-            signal = getattr(widget, "currentFontChanged", None) or getattr(widget, "clicked", None) or getattr(widget, "valueChanged", None) or getattr(widget, "toggled", None)
-            if signal: signal.connect(self.update_preview)
+        self.font.currentFontChanged.connect(self.update_preview)
+        self.fill.colorChanged.connect(self.update_preview)
+        self.outline_color.colorChanged.connect(self.update_preview)
+        self.outline.valueChanged.connect(self.update_preview)
+        self.slant.valueChanged.connect(self.update_preview)
+        self.angle.valueChanged.connect(self.update_preview)
+        self.bold.toggled.connect(self.update_preview)
+        self.vertical.toggled.connect(self.update_preview)
+        self.shadow.toggled.connect(self.update_preview)
+        self.burst.toggled.connect(self.update_preview)
+        self.target.currentIndexChanged.connect(self.update_target_hint)
+        self.refresh_preset_icons(sample_words)
+        self.update_target_hint()
         self.update_preview()
 
     def values(self):
-        return {"preset": self.preset.currentText(), "font": self.font.currentFont().family(),
+        return {"preset": self.current_preset, "font": self.font.currentFont().family(),
                 "fill": self.fill.color.name(), "outline_color": self.outline_color.color.name(),
                 "outline": self.outline.value(), "slant": self.slant.value(), "angle": self.angle.value(),
                 "bold": self.bold.isChecked(), "vertical": self.vertical.isChecked(),
                 "shadow": self.shadow.isChecked(), "burst": self.burst.isChecked(),
                 "target": self.target.currentData()}
 
-    def apply_preset(self, name):
+    def select_preset(self, name):
+        self.current_preset = name
+        for preset_name, button in self.preset_buttons.items():
+            button.setChecked(preset_name == name)
         preset = PRESETS.get(name, {})
         self.bold.setChecked(preset.get("bold", True)); self.outline.setValue(preset.get("outline", 6))
         self.slant.setValue(preset.get("slant", 0)); self.angle.setValue(preset.get("angle", 0))
         self.shadow.setChecked(preset.get("shadow", False)); self.burst.setChecked(preset.get("burst", False))
         self.update_preview()
+
+    def refresh_preset_icons(self, sample_words):
+        base = self.values()
+        for name, button in self.preset_buttons.items():
+            preview_values = dict(base)
+            preview_values["preset"] = name
+            preview_values.update(PRESETS[name])
+            image = render_material(sample_words[name], preview_values, 132, 64)
+            button.setIcon(QIcon(QPixmap.fromImage(image)))
+
+    def update_target_hint(self, *args):
+        hints = {
+            "selection": "Canvasで囲んだ範囲へ配置します。最も細かく位置を決められます。",
+            "current_panel": "コマ一覧で選択中のコマ内へ収めます。コマ外にはみ出しません。",
+            "page_center": "ページ中央へ大きめに配置します。作成後に移動・変形できます。",
+        }
+        self.target_hint.setText(hints.get(self.target.currentData(), ""))
 
     def update_preview(self, *args):
         text = self.text.text().strip() or "オノマトペ"
