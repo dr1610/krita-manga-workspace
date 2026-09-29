@@ -482,7 +482,7 @@ class MangaDocker(DockWidget):
         self.text_content.setMaximumHeight(58)
         self.text_content.setPlaceholderText("文字の内容（例：ドン、ザワザワ、台詞本文）")
         text_options_layout.addWidget(self.text_content)
-        self.create_lettering = QPushButton("この領域へ文字・吹き出し素材を作成…")
+        self.create_lettering = QPushButton("この領域へ漫画表現素材を作成…")
         self.create_lettering.clicked.connect(self.create_text_material)
         text_options_layout.addWidget(self.create_lettering)
         editor.addWidget(self.text_options)

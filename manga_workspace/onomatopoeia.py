@@ -8,11 +8,13 @@ from PyQt5.QtGui import (
     QPen, QPixmap, QPolygonF, QTransform,
 )
 from PyQt5.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
+    QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFontComboBox, QFormLayout, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
     QToolButton, QWidget, QScrollArea, QSizePolicy, QFileDialog,
 )
+
+from .asset_library import EFFECT_PRESETS, WORD_LIBRARY
 
 
 SECTION = "manga_workspace_onomatopoeia"
@@ -67,7 +69,7 @@ BALLOON_PRESETS = {
     "電話・機械声": {"shape": "electronic", "tail": "bottom_right", "dashed": True},
 }
 
-PRESET_GROUPS = {"描き文字": PRESETS, "吹き出し": BALLOON_PRESETS}
+PRESET_GROUPS = {"描き文字": PRESETS, "吹き出し": BALLOON_PRESETS, "効果線": EFFECT_PRESETS}
 
 
 def read_setting(name, default):
@@ -100,6 +102,9 @@ def load_defaults():
         "balloon_line": read_setting("balloon_line", "#111111"),
         "balloon_width": float(read_setting("balloon_width", "4")),
         "tail": read_setting("tail", "bottom_left"),
+        "effect_density": int(read_setting("effect_density", "36")),
+        "effect_width": float(read_setting("effect_width", "3")),
+        "effect_color": read_setting("effect_color", "#111111"),
         "target": read_setting("target", "selection"),
     }
 
@@ -346,6 +351,99 @@ def render_balloon(text, values, width, height):
     return image
 
 
+def _edge_point(width, height, angle):
+    dx, dy = math.cos(angle), math.sin(angle)
+    scale = min(width * .5 / max(.0001, abs(dx)), height * .5 / max(.0001, abs(dy)))
+    return QPointF(width * .5 + dx * scale, height * .5 + dy * scale)
+
+
+def _star_path(center, outer, inner, points=4):
+    polygon = []
+    for index in range(points * 2):
+        angle = math.radians(-90 + index * 180.0 / points)
+        radius = outer if index % 2 == 0 else inner
+        polygon.append(QPointF(center.x() + math.cos(angle) * radius,
+                               center.y() + math.sin(angle) * radius))
+    path = QPainterPath(); path.addPolygon(QPolygonF(polygon)); path.closeSubpath()
+    return path
+
+
+def render_effect(values, width, height):
+    """Render common manga effect lines procedurally and deterministically."""
+    width, height = max(64, int(width)), max(64, int(height))
+    image = QImage(width, height, QImage.Format_ARGB32); image.fill(Qt.transparent)
+    definition = EFFECT_PRESETS.get(values.get("preset"), EFFECT_PRESETS["集中線"])
+    effect = definition["effect"]
+    density = max(6, int(values.get("effect_density") or definition.get("density", 30)))
+    line_width = max(.5, float(values.get("effect_width", 3.0)))
+    color = QColor(values.get("effect_color", "#111111"))
+    painter = QPainter(image); painter.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(color, line_width); pen.setCapStyle(Qt.RoundCap); painter.setPen(pen); painter.setBrush(Qt.NoBrush)
+    cx, cy = width * .5, height * .5
+
+    if effect in ("focus", "radial", "shock"):
+        inner_ratio = .34 if effect == "focus" else (.12 if effect == "radial" else .24)
+        for index in range(density):
+            angle = math.radians(index * 360.0 / density + math.sin(index * 2.31) * 2.4)
+            edge = _edge_point(width, height, angle)
+            if effect == "shock":
+                start = QPointF(cx + math.cos(angle) * min(width, height) * inner_ratio,
+                                cy + math.sin(angle) * min(width, height) * inner_ratio)
+                middle = QPointF((start.x() + edge.x()) * .5 + math.sin(index * 4.7) * 8,
+                                 (start.y() + edge.y()) * .5 + math.cos(index * 3.9) * 8)
+                path = QPainterPath(start); path.lineTo(middle); path.lineTo(edge); painter.drawPath(path)
+            else:
+                ratio = inner_ratio + (index % 5) * .014
+                start = QPointF(cx + (edge.x() - cx) * ratio, cy + (edge.y() - cy) * ratio)
+                painter.drawLine(start, edge)
+    elif effect in ("speed_horizontal", "speed_vertical", "speed_diagonal", "rain"):
+        for index in range(density):
+            phase = (index + .5) / density
+            length = (.28 + ((index * 37) % 65) / 100.0)
+            if effect == "speed_horizontal":
+                y = height * phase; x = width * (((index * 29) % 23) / 100.0)
+                painter.drawLine(QPointF(x, y), QPointF(min(width, x + width * length), y))
+            elif effect == "speed_vertical":
+                x = width * phase; y = height * (((index * 29) % 23) / 100.0)
+                painter.drawLine(QPointF(x, y), QPointF(x, min(height, y + height * length)))
+            else:
+                x = width * phase - width * .22; y = 0
+                dx = width * (.30 if effect == "rain" else .62)
+                painter.drawLine(QPointF(x, y), QPointF(x + dx, height))
+    elif effect == "flash":
+        painter.setBrush(color); painter.setPen(Qt.NoPen)
+        painter.drawPath(_star_path(QPointF(cx, cy), min(width, height) * .46,
+                                    min(width, height) * .12, max(8, density // 2)))
+    elif effect == "sparkle":
+        painter.setBrush(color); painter.setPen(Qt.NoPen)
+        for index in range(density):
+            x = width * (.08 + ((index * 43) % 83) / 100.0)
+            y = height * (.08 + ((index * 61) % 83) / 100.0)
+            radius = min(width, height) * (.025 + (index % 4) * .009)
+            painter.drawPath(_star_path(QPointF(x, y), radius, radius * .18, 4))
+    elif effect == "gloom":
+        for index in range(density):
+            x = width * (index + .5) / density
+            end = height * (.34 + ((index * 47) % 55) / 100.0)
+            painter.drawLine(QPointF(x, 0), QPointF(x + math.sin(index) * 4, end))
+    elif effect == "vibration":
+        for index in range(density):
+            y = height * (index + .5) / density
+            path = QPainterPath(QPointF(0, y))
+            for step in range(1, 13):
+                x = width * step / 12.0
+                path.lineTo(x, y + math.sin(step * 2.3 + index) * height * .018)
+            painter.drawPath(path)
+    elif effect == "motion_arc":
+        for index in range(density):
+            inset = index * min(width, height) * .025
+            rect = QRectF(-width * .15 + inset, height * .18 + inset,
+                          width * 1.15 - inset * 2, height * 1.15 - inset * 2)
+            painter.drawArc(rect, 25 * 16, 112 * 16)
+    painter.end()
+    return image
+
+
 def load_external_material(path, maximum=4096):
     """Load a user-selected raster/SVG without downloading or bundling assets."""
     suffix = Path(path).suffix.lower()
@@ -453,7 +551,7 @@ class CollapsibleSection(QWidget):
 class OnomatopoeiaSettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("オノマトペ設定")
+        self.setWindowTitle("漫画表現素材設定")
         values = load_defaults()
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -505,8 +603,8 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.fixed_bounds = list(fixed_bounds) if fixed_bounds else None
         self.fixed_parent_node = fixed_parent_node
         self.setWindowTitle("オノマトペ・吹き出し素材")
-        self.setMinimumSize(760, 680)
-        self.resize(860, 760)
+        self.setMinimumSize(820, 700)
+        self.resize(960, 820)
         values = load_defaults()
         self.current_kind = values.get("kind", "描き文字")
         if self.current_kind not in PRESET_GROUPS:
@@ -518,40 +616,66 @@ class OnomatopoeiaMaterialDialog(QDialog):
         outer.setContentsMargins(12, 10, 12, 10)
         outer.setSpacing(8)
 
-        title = QLabel("オノマトペ・吹き出し素材を作成")
+        title = QLabel("漫画表現素材を作成")
         title.setStyleSheet("font-size:18px;font-weight:700")
-        subtitle = QLabel("描き文字または吹き出しを選び、原稿上へ透明な素材レイヤーとして配置します。")
-        subtitle.setStyleSheet("color:palette(mid)")
+        subtitle = QLabel("作りたいもの、用途、見本の順に選びます。すべてKrita内でローカル生成できます。")
+        subtitle.setStyleSheet("color:palette(text)")
         outer.addWidget(title)
         outer.addWidget(subtitle)
 
         self.preview = QLabel()
-        self.preview.setMinimumHeight(230)
+        self.preview.setMinimumHeight(190)
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setStyleSheet(
-            "QLabel{background:palette(base);border:1px solid palette(mid);border-radius:5px;padding:8px}")
+            "QLabel{background:#f6f6f6;border:1px solid palette(mid);border-radius:5px;padding:8px}")
         outer.addWidget(self.preview, 1)
 
-        entry = QHBoxLayout()
-        entry.addWidget(QLabel("種類"))
         self.kind = QComboBox(); self.kind.addItems(PRESET_GROUPS); self.kind.setCurrentText(self.current_kind)
-        self.kind.setMinimumWidth(110)
-        entry.addWidget(self.kind)
-        entry.addWidget(QLabel("文字"))
-        self.text = QLineEdit(initial_text or "ドン")
+        self.kind.hide()
+        mode_row = QHBoxLayout(); mode_row.setSpacing(6)
+        self.mode_group = QButtonGroup(self); self.mode_buttons = {}
+        mode_descriptions = {
+            "描き文字": "文字・オノマトペ",
+            "吹き出し": "会話・心情・ナレーション",
+            "効果線": "集中・速度・感情演出",
+        }
+        for kind in PRESET_GROUPS:
+            button = QPushButton(kind + "\n" + mode_descriptions[kind])
+            button.setCheckable(True); button.setChecked(kind == self.current_kind)
+            button.setMinimumHeight(48)
+            button.setStyleSheet("QPushButton{text-align:left;padding:6px 12px;font-weight:600}")
+            button.clicked.connect(lambda checked=False, value=kind: self.kind.setCurrentText(value))
+            self.mode_group.addButton(button); self.mode_buttons[kind] = button
+            mode_row.addWidget(button, 1)
+        outer.addLayout(mode_row)
+
+        entry = QHBoxLayout()
+        self.text_label = QLabel("文字")
+        entry.addWidget(self.text_label)
+        self.text = QLineEdit(initial_text)
         self.text.setPlaceholderText("例：ドン、ザワザワ、キラッ")
         self.text.setMinimumHeight(34)
         self.text.setClearButtonEnabled(True)
         entry.addWidget(self.text, 1)
         outer.addLayout(entry)
-        quick = QHBoxLayout()
-        for word in ("ドン", "バン", "ゴゴゴ", "ザワザワ", "キラッ", "シーン"):
-            button = QPushButton(word)
-            button.setFlat(True)
-            button.clicked.connect(lambda checked=False, value=word: self.text.setText(value))
-            quick.addWidget(button)
-        quick.addStretch(1)
-        outer.addLayout(quick)
+
+        self.recent_words = tuple(filter(None, read_setting("recent_words", "").split("|")))
+        word_layout = QVBoxLayout(); word_layout.setContentsMargins(4, 4, 4, 4)
+        word_tools = QHBoxLayout()
+        self.word_category = QComboBox()
+        if self.recent_words:
+            self.word_category.addItem("最近使った")
+        self.word_category.addItems(WORD_LIBRARY)
+        self.word_search = QLineEdit(); self.word_search.setPlaceholderText("擬音や場面を検索　例：ドキ、雨、機械")
+        word_tools.addWidget(self.word_category, 1); word_tools.addWidget(self.word_search, 2)
+        word_layout.addLayout(word_tools)
+        self.word_grid = QGridLayout(); self.word_grid.setSpacing(4)
+        word_widget = QWidget(); word_widget.setLayout(self.word_grid)
+        word_scroll = QScrollArea(); word_scroll.setWidgetResizable(True); word_scroll.setWidget(word_widget)
+        word_scroll.setMinimumHeight(92); word_scroll.setMaximumHeight(116)
+        word_layout.addWidget(word_scroll)
+        self.word_section = CollapsibleSection("ことばを用途から選ぶ", word_layout, True)
+        outer.addWidget(self.word_section)
 
         body = QHBoxLayout()
         body.setSpacing(12)
@@ -561,7 +685,7 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.preset_grid.setSpacing(6)
         preset_widget = QWidget(); preset_widget.setLayout(self.preset_grid)
         preset_scroll = QScrollArea(); preset_scroll.setWidgetResizable(True); preset_scroll.setWidget(preset_widget)
-        preset_scroll.setMinimumHeight(285)
+        preset_scroll.setMinimumHeight(225)
         style_column.addWidget(preset_scroll)
         style_column.addStretch(1)
         body.addLayout(style_column, 1)
@@ -590,13 +714,15 @@ class OnomatopoeiaMaterialDialog(QDialog):
         text_form.addRow("文字色", self.fill)
         text_form.addRow("縁取り色", self.outline_color)
         text_form.addRow("縁取り幅", self.outline)
-        option_column.addWidget(CollapsibleSection("文字と縁取り", text_form, True))
+        self.text_section = CollapsibleSection("文字と縁取り", text_form, True)
+        option_column.addWidget(self.text_section)
 
         transform_form = QFormLayout()
         transform_form.addRow("傾き", self.slant)
         transform_form.addRow("回転", self.angle)
         transform_form.addRow("効果", effects)
-        option_column.addWidget(CollapsibleSection("変形と効果", transform_form, False))
+        self.transform_section = CollapsibleSection("文字の変形", transform_form, False)
+        option_column.addWidget(self.transform_section)
 
         self.balloon_fill = ColorButton(values["balloon_fill"])
         self.balloon_line = ColorButton(values["balloon_line"])
@@ -609,6 +735,19 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.balloon_section = CollapsibleSection("吹き出し設定", balloon_form, self.current_kind == "吹き出し")
         self.balloon_section.setVisible(self.current_kind == "吹き出し")
         option_column.addWidget(self.balloon_section)
+
+        self.effect_color = ColorButton(values["effect_color"])
+        self.effect_density = QSpinBox(); self.effect_density.setRange(6, 120); self.effect_density.setValue(values["effect_density"])
+        self.effect_width = QDoubleSpinBox(); self.effect_width.setRange(.5, 20); self.effect_width.setSingleStep(.5); self.effect_width.setValue(values["effect_width"]); self.effect_width.setSuffix(" px")
+        effect_form = QFormLayout(); effect_form.addRow("線の色", self.effect_color); effect_form.addRow("線の本数・密度", self.effect_density); effect_form.addRow("線の太さ", self.effect_width)
+        self.effect_section = CollapsibleSection("効果線設定", effect_form, self.current_kind == "効果線")
+        self.effect_section.setVisible(self.current_kind == "効果線")
+        option_column.addWidget(self.effect_section)
+        initial_uses_text = self.current_kind != "効果線"
+        self.text_label.setVisible(initial_uses_text); self.text.setVisible(initial_uses_text)
+        self.word_section.setVisible(self.current_kind == "描き文字")
+        self.text_section.setVisible(initial_uses_text)
+        self.transform_section.setVisible(self.current_kind == "描き文字")
 
         placement_form = QFormLayout()
         placement_form.addRow("配置先", self.target)
@@ -623,6 +762,7 @@ class OnomatopoeiaMaterialDialog(QDialog):
 
         self.remember = QCheckBox("今回の設定を既定値にする")
         outer.addWidget(self.remember)
+        external_layout = QVBoxLayout(); external_layout.setContentsMargins(4, 4, 4, 4)
         library_row = QHBoxLayout()
         self.material_site = QComboBox()
         for title, url, terms in EXTERNAL_MATERIAL_SITES:
@@ -636,19 +776,20 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.open_material_terms_button.clicked.connect(self.open_material_terms)
         library_row.addWidget(self.open_material_terms_button)
         self.material_site.currentIndexChanged.connect(self.update_material_site_actions)
-        outer.addLayout(library_row)
+        external_layout.addLayout(library_row)
         import_row = QHBoxLayout()
         self.import_material_button = QPushButton("取得済みPNG・JPG・SVGを読み込む…")
         self.import_material_button.setToolTip(
             "自分で利用条件を確認して取得した画像素材を、現在の配置先へ透明レイヤーとして追加します")
         self.import_material_button.clicked.connect(self.import_external_material)
         import_row.addWidget(self.import_material_button, 1)
-        outer.addLayout(import_row)
+        external_layout.addLayout(import_row)
         license_note = QLabel(
             "外部素材は同梱・自動取得しません。利用数、改変、商用利用などは各配布元の条件を確認してください。")
         license_note.setWordWrap(True)
         license_note.setStyleSheet("color:palette(mid);font-size:11px")
-        outer.addWidget(license_note)
+        external_layout.addWidget(license_note)
+        outer.addWidget(CollapsibleSection("外部で取得した素材を使う", external_layout, False))
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         self.generate = QPushButton("原稿に素材レイヤーを作成")
         self.generate.setMinimumHeight(40)
@@ -673,7 +814,13 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.balloon_line.colorChanged.connect(self.update_preview)
         self.balloon_width.valueChanged.connect(self.update_preview)
         self.tail.currentIndexChanged.connect(self.update_preview)
+        self.effect_color.colorChanged.connect(self.update_preview)
+        self.effect_density.valueChanged.connect(self.update_preview)
+        self.effect_width.valueChanged.connect(self.update_preview)
+        self.word_category.currentTextChanged.connect(self.rebuild_word_buttons)
+        self.word_search.textChanged.connect(self.rebuild_word_buttons)
         self.target.currentIndexChanged.connect(self.update_target_hint)
+        self.rebuild_word_buttons()
         self.rebuild_preset_buttons()
         self.update_material_site_actions()
         self.update_target_hint()
@@ -688,15 +835,55 @@ class OnomatopoeiaMaterialDialog(QDialog):
                 "shadow": self.shadow.isChecked(), "burst": self.burst.isChecked(),
                 "balloon_fill": self.balloon_fill.color.name(), "balloon_line": self.balloon_line.color.name(),
                 "balloon_width": self.balloon_width.value(), "tail": self.tail.currentData(),
+                "effect_color": self.effect_color.color.name(), "effect_density": self.effect_density.value(),
+                "effect_width": self.effect_width.value(),
                 "target": self.target.currentData()})
         return result
 
     def change_kind(self, kind):
         self.current_kind = kind
         self.current_preset = next(iter(PRESET_GROUPS[kind]))
+        for name, button in self.mode_buttons.items():
+            button.setChecked(name == kind)
+        uses_text = kind != "効果線"
+        self.text_label.setVisible(uses_text); self.text.setVisible(uses_text)
+        self.word_section.setVisible(kind == "描き文字")
+        self.text_section.setVisible(uses_text)
+        self.transform_section.setVisible(kind == "描き文字")
         self.balloon_section.setVisible(kind == "吹き出し")
+        self.effect_section.setVisible(kind == "効果線")
+        self.balloon_section.toggle.setChecked(kind == "吹き出し")
+        self.effect_section.toggle.setChecked(kind == "効果線")
         self.rebuild_preset_buttons()
         self.select_preset(self.current_preset)
+
+    def rebuild_word_buttons(self, *args):
+        while self.word_grid.count():
+            item = self.word_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        query = self.word_search.text().strip().lower()
+        if query:
+            words = []
+            for category, entries in WORD_LIBRARY.items():
+                if query in category.lower():
+                    words.extend(entries)
+                else:
+                    words.extend(word for word in entries if query in word.lower())
+        elif self.word_category.currentText() == "最近使った":
+            words = list(self.recent_words)
+        else:
+            words = list(WORD_LIBRARY.get(self.word_category.currentText(), ()))
+        words = list(dict.fromkeys(words))[:36]
+        if not words:
+            label = QLabel("該当することばがありません。自由入力できます。")
+            label.setStyleSheet("color:palette(mid)"); self.word_grid.addWidget(label, 0, 0, 1, 4)
+            return
+        for index, word in enumerate(words):
+            button = QPushButton(word); button.setMinimumHeight(28)
+            button.setToolTip("クリックして文字欄へ入力")
+            button.clicked.connect(lambda checked=False, value=word: self.text.setText(value))
+            self.word_grid.addWidget(button, index // 6, index % 6)
 
     def rebuild_preset_buttons(self):
         while self.preset_grid.count():
@@ -723,8 +910,10 @@ class OnomatopoeiaMaterialDialog(QDialog):
             self.bold.setChecked(preset.get("bold", True)); self.outline.setValue(preset.get("outline", 6))
             self.slant.setValue(preset.get("slant", 0)); self.angle.setValue(preset.get("angle", 0))
             self.shadow.setChecked(preset.get("shadow", False)); self.burst.setChecked(preset.get("burst", False))
-        elif preset.get("tail"):
+        elif self.current_kind == "吹き出し" and preset.get("tail"):
             self.tail.setCurrentIndex(max(0, self.tail.findData(preset["tail"])))
+        elif self.current_kind == "効果線":
+            self.effect_density.setValue(preset.get("density", 30))
         self.update_preview()
 
     def refresh_preset_icons(self):
@@ -736,8 +925,12 @@ class OnomatopoeiaMaterialDialog(QDialog):
             preview_values = dict(base)
             preview_values["preset"] = name
             preview_values.update(PRESET_GROUPS[self.current_kind][name])
-            image = (render_material(lettering_words.get(name, "文字"), preview_values, 116, 58)
-                     if self.current_kind == "描き文字" else render_balloon("あ", preview_values, 116, 58))
+            if self.current_kind == "描き文字":
+                image = render_material(lettering_words.get(name, "文字"), preview_values, 116, 58)
+            elif self.current_kind == "吹き出し":
+                image = render_balloon("", preview_values, 116, 58)
+            else:
+                image = render_effect(preview_values, 116, 58)
             button.setIcon(QIcon(QPixmap.fromImage(image)))
 
     def update_target_hint(self, *args):
@@ -769,9 +962,14 @@ class OnomatopoeiaMaterialDialog(QDialog):
             QDesktopServices.openUrl(QUrl(terms))
 
     def update_preview(self, *args):
-        text = self.text.text().strip() or "オノマトペ"
-        image = (render_material(text, self.values(), 520, 220) if self.current_kind == "描き文字"
-                 else render_balloon(text, self.values(), 520, 220))
+        entered_text = self.text.text().strip()
+        text = entered_text or ("オノマトペ" if self.current_kind == "描き文字" else "")
+        if self.current_kind == "描き文字":
+            image = render_material(text, self.values(), 520, 220)
+        elif self.current_kind == "吹き出し":
+            image = render_balloon(text, self.values(), 520, 220)
+        else:
+            image = render_effect(self.values(), 520, 220)
         self.preview.setPixmap(QPixmap.fromImage(image))
 
     @staticmethod
@@ -828,17 +1026,30 @@ class OnomatopoeiaMaterialDialog(QDialog):
         if not document:
             QMessageBox.information(self, "オノマトペ素材", "原稿を開いてください")
             return
-        if not text:
+        if not text and self.current_kind == "描き文字":
             QMessageBox.information(self, "オノマトペ素材", "文字を入力してください")
             return
         try:
             bounds, polygon = self.target_geometry(document)
             x, y, width, height = bounds
-            image = (render_material(text, self.values(), width, height) if self.current_kind == "描き文字"
-                     else render_balloon(text, self.values(), width, height))
+            if self.current_kind == "描き文字":
+                image = render_material(text, self.values(), width, height)
+            elif self.current_kind == "吹き出し":
+                image = render_balloon(text, self.values(), width, height)
+            else:
+                image = render_effect(self.values(), width, height)
             apply_polygon_mask(image, polygon, x, y)
-            prefix = "オノマトペ：" if self.current_kind == "描き文字" else "吹き出し："
-            self.place_image(document, image, bounds, prefix + text[:24])
+            if self.current_kind == "描き文字":
+                layer_name = "描き文字：" + text[:24]
+            elif self.current_kind == "吹き出し":
+                layer_name = "吹き出し" + (("：" + text[:24]) if text else "（空）")
+            else:
+                layer_name = "効果線：" + self.current_preset
+            self.place_image(document, image, bounds, layer_name)
+            if text and self.current_kind == "描き文字":
+                recent = [text] + [word for word in self.recent_words if word != text]
+                self.recent_words = tuple(recent[:18])
+                Krita.instance().writeSetting(SECTION, "recent_words", "|".join(self.recent_words))
             if self.remember.isChecked():
                 remembered = self.values()
                 if remembered["target"] == "fixed_region":

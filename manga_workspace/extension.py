@@ -72,7 +72,7 @@ class WorkspaceExtension(Extension):
         menu.addAction("保存した配置に戻す", lambda: self.restore_layout(main))
         sound_menu = main.menuBar().addMenu("オノマトペ")
         sound_menu.setObjectName("manga_onomatopoeia_menu")
-        sound_menu.addAction(make_icon(), "オノマトペ・吹き出し素材を作成…",
+        sound_menu.addAction(make_icon(), "漫画表現素材を作成…",
                              lambda checked=False, m=main: self.open_onomatopoeia_material(m))
         sound_menu.addAction("オノマトペ設定…",
                              lambda checked=False, m=main: self.open_onomatopoeia_settings(m))
@@ -122,7 +122,7 @@ class WorkspaceExtension(Extension):
         toolbar.setIconSize(QSize(30, 30))
         toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         action = toolbar.addAction(make_icon(32), "オノマトペ素材")
-        action.setToolTip("オノマトペ・吹き出し素材を作成")
+        action.setToolTip("描き文字・吹き出し・効果線を作成")
         action.triggered.connect(lambda checked=False, m=main: self.open_onomatopoeia_material(m))
         main.addToolBar(Qt.LeftToolBarArea, toolbar)
         toolbar.show()
