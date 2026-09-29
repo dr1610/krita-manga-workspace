@@ -992,6 +992,12 @@ class OnomatopoeiaMaterialDialog(QDialog):
         body.addLayout(option_column, 1)
         outer.addLayout(body)
 
+        from .user_materials import UserMaterials
+        personal_layout = QVBoxLayout()
+        self.user_materials = UserMaterials(self)
+        personal_layout.addWidget(self.user_materials)
+        outer.insertWidget(2, CollapsibleSection("マイ素材 — 登録・選択・配置", personal_layout, False))
+
         self.remember = QCheckBox("今回の設定を既定値にする")
         outer.addWidget(self.remember)
         external_layout = QVBoxLayout(); external_layout.setContentsMargins(4, 4, 4, 4)

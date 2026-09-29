@@ -414,6 +414,9 @@ class PanelDocker(DockWidget):
         self.document.setModified(True)
         self.document.refreshProjection()
         self.refresh()
+        for widget in QApplication.allWidgets():
+            if widget.objectName() == "manga_page_guide_overlay":
+                widget.update()
 
     def create_frame(self, poly, source=None):
         doc = self.document

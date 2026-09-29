@@ -257,6 +257,7 @@ class PageGuideOverlay(QWidget):
     def __init__(self, canvas, view, settings):
         super().__init__(canvas)
         self.view,self.settings=view,settings
+        self.setObjectName("manga_page_guide_overlay")
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WA_NoSystemBackground)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -271,16 +272,35 @@ class PageGuideOverlay(QWidget):
         inverse,ok=self.view.flakeToImageTransform().inverted()
         return self.view.flakeToCanvasTransform().map(inverse.map(QPointF(*p)))
 
-    def draw_rect(self,painter,rect,color,style,label):
+    def draw_rect(self,painter,rect,color,style,label,corners=False):
         a,b=self.to_canvas(rect[:2]),self.to_canvas(rect[2:])
-        painter.setPen(QPen(QColor(color),1,style)); painter.drawRect(QRectF(a,b).normalized())
+        painter.setPen(QPen(QColor(color),1,style))
+        if corners:
+            points=[self.to_canvas(p) for p in ((rect[0],rect[1]),(rect[2],rect[1]),
+                                               (rect[2],rect[3]),(rect[0],rect[3]))]
+            for i,point in enumerate(points):
+                for neighbor in (points[(i-1)%4],points[(i+1)%4]):
+                    delta=neighbor-point
+                    length=(delta.x()**2+delta.y()**2)**.5
+                    if length:
+                        painter.drawLine(point,point+delta*min(.08,10/length))
+        else:
+            painter.drawRect(QRectF(a,b).normalized())
         painter.drawText(a+QPointF(4,-4),label)
 
     def paintEvent(self,event):
         painter=QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
         self.draw_rect(painter,self.settings["bleed_px"],"#e57373",Qt.DotLine,"裁ち落とし")
         self.draw_rect(painter,self.settings["finish_px"],"#606060",Qt.SolidLine,"仕上がり")
-        self.draw_rect(painter,self.settings["basic_frame_px"],"#42a5f5",Qt.DashLine,"基本枠")
+        # The page guide is not a printable frame. Do not visually reconnect
+        # gutters after splitting a panel with an uninterrupted guide rectangle.
+        try:
+            frames=json.loads(bytes(self.view.document().annotation(FRAME_SETTINGS_KEY)))
+            divided=sum(bool(p.get("active",True)) for p in frames.get("panels",[]))>1
+        except (ValueError,TypeError,AttributeError):
+            divided=False
+        self.draw_rect(painter,self.settings["basic_frame_px"],"#42a5f5",Qt.DashLine,
+                       "基本枠ガイド",corners=divided)
         painter.end()
 
 
