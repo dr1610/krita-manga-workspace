@@ -1,4 +1,4 @@
-param([string]$Version='0.7.0-alpha')
+param([string]$Version='0.7.1-alpha')
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $MyInvocation.MyCommand.Path
 $release=Join-Path $root 'release'
