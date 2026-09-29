@@ -1,7 +1,8 @@
 """Onomatopoeia material generator for the manga workspace."""
 import math
 from pathlib import Path
-from krita import Krita
+from xml.sax.saxutils import escape, quoteattr
+from krita import Krita, Selection
 from PyQt5.QtCore import QByteArray, Qt, QSize, QRectF, QPointF, QUrl, pyqtSignal
 from PyQt5.QtGui import (
     QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QImage, QPainter, QPainterPath,
@@ -61,10 +62,14 @@ BALLOON_PRESETS = {
     "縦長": {"shape": "vertical", "tail": "bottom"},
     "角丸": {"shape": "rounded", "tail": "bottom_right"},
     "雲形": {"shape": "cloud", "tail": "bottom_left"},
+    "波形": {"shape": "wave", "tail": "bottom_left"},
     "思考": {"shape": "thought", "tail": "bottom_left"},
+    "爆発": {"shape": "spike", "tail": "none"},
     "叫び": {"shape": "spike", "tail": "none"},
     "トゲ": {"shape": "jagged", "tail": "none"},
-    "四角": {"shape": "box", "tail": "bottom"},
+    "四角": {"shape": "box", "tail": "none"},
+    "フラッシュ": {"shape": "flash", "tail": "none"},
+    "ウニフラッシュ": {"shape": "uni_flash", "tail": "none"},
     "ナレーション": {"shape": "narration", "tail": "none"},
     "電話・機械声": {"shape": "electronic", "tail": "bottom_right", "dashed": True},
 }
@@ -102,6 +107,8 @@ def load_defaults():
         "balloon_line": read_setting("balloon_line", "#111111"),
         "balloon_width": float(read_setting("balloon_width", "4")),
         "tail": read_setting("tail", "bottom_left"),
+        "tail_length": float(read_setting("tail_length", "28")),
+        "tail_width": float(read_setting("tail_width", "22")),
         "effect_density": int(read_setting("effect_density", "36")),
         "effect_width": float(read_setting("effect_width", "3")),
         "effect_color": read_setting("effect_color", "#111111"),
@@ -247,13 +254,21 @@ def _balloon_body_path(shape, rect):
         path.addRoundedRect(rect, rect.height() * 0.18, rect.height() * 0.18)
     elif shape in ("box", "narration"):
         path.addRect(rect)
-    elif shape in ("spike", "jagged"):
+    elif shape == "flash":
+        oval = _flash_oval(rect)
+        path.addEllipse(oval.adjusted(oval.width() * .14, oval.height() * .14,
+                                      -oval.width() * .14, -oval.height() * .14))
+    elif shape == "uni_flash":
+        oval = _flash_oval(rect)
+        path.addEllipse(oval.adjusted(oval.width() * .11, oval.height() * .11,
+                                      -oval.width() * .11, -oval.height() * .11))
+    elif shape in ("spike", "jagged", "wave"):
         points = []
-        count = 32 if shape == "spike" else 22
+        count = 48 if shape == "wave" else (32 if shape == "spike" else 22)
         for index in range(count):
             angle = math.radians(-90 + index * 360.0 / count)
             outer = index % 2 == 0
-            factor = (1.0 if outer else (0.70 if shape == "spike" else 0.82))
+            factor = (1.0 if outer else (0.94 if shape == "wave" else (0.70 if shape == "spike" else 0.82)))
             points.append(QPointF(rect.center().x() + math.cos(angle) * rect.width() * 0.5 * factor,
                                   rect.center().y() + math.sin(angle) * rect.height() * 0.5 * factor))
         path.addPolygon(QPolygonF(points))
@@ -261,6 +276,7 @@ def _balloon_body_path(shape, rect):
     elif shape in ("cloud", "thought"):
         body = QPainterPath()
         for cx, cy, rw, rh in (
+                (0.50, 0.48, 0.62, 0.58),
                 (0.20, 0.38, 0.30, 0.48), (0.36, 0.24, 0.35, 0.43),
                 (0.57, 0.22, 0.37, 0.43), (0.78, 0.39, 0.32, 0.47),
                 (0.67, 0.66, 0.40, 0.48), (0.39, 0.70, 0.48, 0.47),
@@ -276,24 +292,103 @@ def _balloon_body_path(shape, rect):
     return path
 
 
-def _tail_path(rect, direction):
+TAIL_DIRECTIONS = {
+    "bottom_left": (-0.55, 1.0), "bottom": (0.0, 1.0), "bottom_right": (0.55, 1.0),
+    "left": (-1.0, 0.0), "right": (1.0, 0.0),
+    "top_left": (-0.55, -1.0), "top": (0.0, -1.0), "top_right": (0.55, -1.0),
+}
+
+
+def _tail_path(rect, direction, width_percent=22.0, length_percent=28.0):
     tail = QPainterPath()
-    if direction == "bottom_left":
-        points = (QPointF(rect.left() + rect.width() * .27, rect.bottom() - 3),
-                  QPointF(rect.left() + rect.width() * .16, rect.bottom() + rect.height() * .22),
-                  QPointF(rect.left() + rect.width() * .43, rect.bottom() - 4))
-    elif direction == "bottom_right":
-        points = (QPointF(rect.left() + rect.width() * .57, rect.bottom() - 4),
-                  QPointF(rect.left() + rect.width() * .84, rect.bottom() + rect.height() * .22),
-                  QPointF(rect.left() + rect.width() * .73, rect.bottom() - 3))
-    elif direction == "bottom":
-        points = (QPointF(rect.left() + rect.width() * .43, rect.bottom() - 4),
-                  QPointF(rect.center().x(), rect.bottom() + rect.height() * .22),
-                  QPointF(rect.left() + rect.width() * .58, rect.bottom() - 4))
-    else:
+    vector = TAIL_DIRECTIONS.get(direction)
+    if not vector:
         return tail
-    tail.addPolygon(QPolygonF(points)); tail.closeSubpath()
+    dx, dy = vector
+    magnitude = math.hypot(dx, dy)
+    dx, dy = dx / magnitude, dy / magnitude
+    radius_x, radius_y = rect.width() * .5, rect.height() * .5
+    scale = 1.0 / math.sqrt((dx / max(1.0, radius_x)) ** 2 +
+                            (dy / max(1.0, radius_y)) ** 2)
+    join = QPointF(rect.center().x() + dx * scale, rect.center().y() + dy * scale)
+    tangent_x, tangent_y = -dy, dx
+    half_width = min(rect.width(), rect.height()) * max(.04, min(.45, width_percent / 100.0)) * .5
+    root_one = QPointF(join.x() + tangent_x * half_width, join.y() + tangent_y * half_width)
+    root_two = QPointF(join.x() - tangent_x * half_width, join.y() - tangent_y * half_width)
+    length = min(rect.width(), rect.height()) * max(.05, min(.90, length_percent / 100.0))
+    tip = QPointF(join.x() + dx * length, join.y() + dy * length)
+    tail.addPolygon(QPolygonF((root_one, tip, root_two)))
+    tail.closeSubpath()
     return tail
+
+
+def _ellipse_with_tail(rect, direction, width_percent=22.0, length_percent=28.0):
+    """Build a low-node ellipse whose outline directly includes the tail."""
+    vector = TAIL_DIRECTIONS.get(direction)
+    if not vector:
+        path = QPainterPath(); path.addEllipse(rect); return path
+    dx, dy = vector
+    magnitude = math.hypot(dx, dy); dx, dy = dx / magnitude, dy / magnitude
+    center_angle = math.degrees(-math.atan2(dy, dx))
+    half_arc = max(5.0, min(32.0, float(width_percent) * .78))
+    start_angle = center_angle + half_arc
+    path = QPainterPath(); path.arcMoveTo(rect, start_angle)
+    root_start = path.currentPosition()
+    path.arcTo(rect, start_angle, 360.0 - half_arc * 2.0)
+    root_end = path.currentPosition()
+    radius_x, radius_y = rect.width() * .5, rect.height() * .5
+    scale = 1.0 / math.sqrt((dx / max(1.0, radius_x)) ** 2 +
+                            (dy / max(1.0, radius_y)) ** 2)
+    join = QPointF(rect.center().x() + dx * scale, rect.center().y() + dy * scale)
+    length = min(rect.width(), rect.height()) * max(.05, min(.90, length_percent / 100.0))
+    tip = QPointF(join.x() + dx * length, join.y() + dy * length)
+    path.lineTo(tip); path.lineTo(root_start)
+    path.closeSubpath()
+    return path
+
+
+def _combined_balloon_path(shape, rect, values, tail_direction):
+    if shape in ("ellipse", "vertical"):
+        return _ellipse_with_tail(rect, tail_direction, float(values.get("tail_width", 22.0)),
+                                  float(values.get("tail_length", 28.0)))
+    body = _balloon_body_path(shape, rect)
+    return body.united(_tail_path(rect, tail_direction, float(values.get("tail_width", 22.0)),
+                                  float(values.get("tail_length", 28.0))))
+
+
+def _flash_oval(rect):
+    width = min(rect.width(), rect.height() * .76)
+    return QRectF(rect.center().x() - width * .5, rect.top(), width, rect.height())
+
+
+def _uni_flash_lines(rect, count=144):
+    rect = _flash_oval(rect)
+    lines = []
+    for index in range(count):
+        angle = index * 2.0 * math.pi / count
+        cs, sn = math.cos(angle), math.sin(angle)
+        inner = QPointF(rect.center().x() + cs * rect.width() * .39,
+                        rect.center().y() + sn * rect.height() * .39)
+        reach = .50 if index % 3 else .47
+        outer = QPointF(rect.center().x() + cs * rect.width() * reach,
+                        rect.center().y() + sn * rect.height() * reach)
+        lines.append((inner, outer))
+    return lines
+
+
+def _flash_lines(rect, count=96):
+    rect = _flash_oval(rect)
+    lines = []
+    for index in range(count):
+        angle = math.radians(index * 360.0 / count)
+        cs, sn = math.cos(angle), math.sin(angle)
+        inner = QPointF(rect.center().x() + cs * rect.width() * .35,
+                        rect.center().y() + sn * rect.height() * .35)
+        reach = .50 if index % 2 == 0 else .46
+        outer = QPointF(rect.center().x() + cs * rect.width() * reach,
+                        rect.center().y() + sn * rect.height() * reach)
+        lines.append((inner, outer))
+    return lines
 
 
 def render_balloon(text, values, width, height):
@@ -306,11 +401,10 @@ def render_balloon(text, values, width, height):
     margin = max(10.0, float(values.get("balloon_width", 4.0)) * 2.5)
     tail_room = height * 0.15 if preset.get("tail", "none") != "none" else 0
     rect = QRectF(margin, margin, width - margin * 2, height - margin * 2 - tail_room)
-    body = _balloon_body_path(shape, rect)
     tail_direction = values.get("tail") or preset.get("tail", "none")
-    if shape == "thought":
+    if shape in ("thought", "spike", "jagged", "flash", "uni_flash"):
         tail_direction = "none"
-    combined = body.united(_tail_path(rect, tail_direction))
+    combined = _combined_balloon_path(shape, rect, values, tail_direction)
 
     painter = QPainter(image)
     painter.setRenderHint(QPainter.Antialiasing)
@@ -319,9 +413,18 @@ def render_balloon(text, values, width, height):
     pen.setJoinStyle(Qt.RoundJoin)
     if preset.get("dashed"):
         pen.setStyle(Qt.DashLine)
-    painter.setPen(pen)
-    painter.setBrush(QColor(values.get("balloon_fill", "#ffffff")))
+    painter.setPen(Qt.NoPen if shape in ("flash", "uni_flash") else pen)
+    painter.setBrush(QColor(values.get("balloon_line", "#111111")) if shape == "uni_flash"
+                     else QColor(values.get("balloon_fill", "#ffffff")))
     painter.drawPath(combined)
+    if shape == "flash":
+        painter.setPen(QPen(QColor(values.get("balloon_line", "#111111")), max(.5, line_width * .28)))
+        for start, end in _flash_lines(rect):
+            painter.drawLine(start, end)
+    elif shape == "uni_flash":
+        painter.setPen(QPen(QColor(values.get("balloon_line", "#111111")), max(.5, line_width * .28)))
+        for start, end in _uni_flash_lines(rect):
+            painter.drawLine(start, end)
     if shape == "thought":
         painter.drawEllipse(QRectF(rect.left() + rect.width() * .10, rect.bottom() + 4,
                                    rect.width() * .10, rect.height() * .10))
@@ -349,6 +452,104 @@ def render_balloon(text, values, width, height):
         painter.drawPath(path)
     painter.end()
     return image
+
+
+def _svg_path_data(path):
+    """Serialize a QPainterPath without flattening its editable cubic curves."""
+    parts = []
+    index = 0
+    while index < path.elementCount():
+        element = path.elementAt(index)
+        if element.type == QPainterPath.MoveToElement:
+            parts.append("M %.3f %.3f" % (element.x, element.y))
+            index += 1
+        elif element.type == QPainterPath.LineToElement:
+            parts.append("L %.3f %.3f" % (element.x, element.y))
+            index += 1
+        elif element.type == QPainterPath.CurveToElement and index + 2 < path.elementCount():
+            second = path.elementAt(index + 1)
+            end = path.elementAt(index + 2)
+            parts.append("C %.3f %.3f %.3f %.3f %.3f %.3f" % (
+                element.x, element.y, second.x, second.y, end.x, end.y))
+            index += 3
+        else:
+            index += 1
+    return " ".join(parts)
+
+
+def _svg_document(document, content):
+    resolution = max(1.0, float(document.resolution()))
+    width_points = document.width() * 72.0 / resolution
+    height_points = document.height() * 72.0 / resolution
+    return ("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%.4fpt\" height=\"%.4fpt\" "
+            "viewBox=\"0 0 %d %d\">%s</svg>" %
+            (width_points, height_points, document.width(), document.height(), content))
+
+
+def balloon_svg(document, values, bounds):
+    """Create one editable SVG outline from the united balloon and tail geometry."""
+    x, y, width, height = [float(value) for value in bounds]
+    preset = BALLOON_PRESETS.get(values.get("preset"), BALLOON_PRESETS["通常"])
+    shape = preset.get("shape", "ellipse")
+    line_width = max(1.0, float(values.get("balloon_width", 4.0)))
+    margin = max(10.0, line_width * 2.5)
+    tail_direction = values.get("tail") or preset.get("tail", "none")
+    if shape in ("thought", "spike", "jagged", "flash", "uni_flash"):
+        tail_direction = "none"
+    tail_room = height * .18 if tail_direction != "none" else 0.0
+    rect = QRectF(margin, margin, max(8.0, width - margin * 2),
+                  max(8.0, height - margin * 2 - tail_room))
+    combined = _combined_balloon_path(shape, rect, values, tail_direction)
+    transform = QTransform(); transform.translate(x, y)
+    combined = transform.map(combined)
+    fill = QColor(values.get("balloon_line", "#111111") if shape == "uni_flash"
+                  else values.get("balloon_fill", "#ffffff")).name()
+    stroke = QColor(values.get("balloon_line", "#111111")).name()
+    dash = " stroke-dasharray=\"%.3f %.3f\"" % (line_width * 2.4, line_width * 1.8) if preset.get("dashed") else ""
+    shape_stroke = "none" if shape in ("flash", "uni_flash") else stroke
+    items = ["<path d=%s fill=%s stroke=%s stroke-width=\"%.3f\" stroke-linejoin=\"round\"%s/>" %
+             (quoteattr(_svg_path_data(combined)), quoteattr(fill), quoteattr(shape_stroke), line_width, dash)]
+    if shape == "flash":
+        items.extend("<path d=\"M %.3f %.3f L %.3f %.3f\" fill=\"none\" stroke=%s stroke-width=\"%.3f\"/>" %
+                     (x + start.x(), y + start.y(), x + end.x(), y + end.y(), quoteattr(stroke), max(.5, line_width * .28))
+                     for start, end in _flash_lines(rect))
+    elif shape == "uni_flash":
+        items.extend("<path d=\"M %.3f %.3f L %.3f %.3f\" fill=\"none\" stroke=%s stroke-width=\"%.3f\"/>" %
+                     (x + start.x(), y + start.y(), x + end.x(), y + end.y(), quoteattr(stroke), max(.5, line_width * .28))
+                     for start, end in _uni_flash_lines(rect))
+    if shape == "thought":
+        items.append("<ellipse cx=\"%.3f\" cy=\"%.3f\" rx=\"%.3f\" ry=\"%.3f\" fill=%s stroke=%s stroke-width=\"%.3f\"/>" %
+                     (x + rect.left() + rect.width() * .15, y + rect.bottom() + rect.height() * .05,
+                      rect.width() * .05, rect.height() * .05, quoteattr(fill), quoteattr(stroke), line_width))
+        items.append("<ellipse cx=\"%.3f\" cy=\"%.3f\" rx=\"%.3f\" ry=\"%.3f\" fill=%s stroke=%s stroke-width=\"%.3f\"/>" %
+                     (x + rect.left() + rect.width() * .06, y + rect.bottom() + rect.height() * .16,
+                      rect.width() * .027, rect.height() * .027, quoteattr(fill), quoteattr(stroke), line_width))
+    return _svg_document(document, "".join(items))
+
+
+def balloon_text_svg(document, text, values, bounds):
+    x, y, width, height = [float(value) for value in bounds]
+    lines = text.splitlines() or [text]
+    font_size = max(12.0, min(height * .22 / max(1, len(lines)), width / max(3, max(map(len, lines))) * 1.35))
+    family = values.get("font") or default_font_family()
+    fill = QColor(values.get("fill", "#111111")).name()
+    weight = "700" if values.get("bold") else "400"
+    if values.get("vertical"):
+        content = ("<text x=\"%.3f\" y=\"%.3f\" text-anchor=\"middle\" writing-mode=\"vertical-rl\" "
+                   "font-family=%s font-size=\"%.3f\" font-weight=\"%s\" fill=%s>%s</text>" %
+                   (x + width * .5, y + height * .18, quoteattr(family), font_size, weight,
+                    quoteattr(fill), escape(text.replace("\n", ""))))
+    else:
+        line_height = font_size * 1.25
+        first_y = y + height * .5 - line_height * (len(lines) - 1) * .5
+        spans = []
+        for index, line in enumerate(lines):
+            spans.append("<tspan x=\"%.3f\" y=\"%.3f\">%s</tspan>" %
+                         (x + width * .5, first_y + index * line_height, escape(line)))
+        content = ("<text text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=%s "
+                   "font-size=\"%.3f\" font-weight=\"%s\" fill=%s>%s</text>" %
+                   (quoteattr(family), font_size, weight, quoteattr(fill), "".join(spans)))
+    return _svg_document(document, content)
 
 
 def _edge_point(width, height, angle):
@@ -742,10 +943,20 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.balloon_line = ColorButton(values["balloon_line"])
         self.balloon_width = QDoubleSpinBox(); self.balloon_width.setRange(0.5, 30); self.balloon_width.setValue(values["balloon_width"]); self.balloon_width.setSuffix(" px")
         self.tail = QComboBox()
-        self.tail.addItem("左下", "bottom_left"); self.tail.addItem("中央下", "bottom"); self.tail.addItem("右下", "bottom_right"); self.tail.addItem("なし", "none")
+        for title, value in (("左下", "bottom_left"), ("中央下", "bottom"), ("右下", "bottom_right"),
+                             ("左", "left"), ("右", "right"), ("左上", "top_left"),
+                             ("中央上", "top"), ("右上", "top_right"), ("なし", "none")):
+            self.tail.addItem(title, value)
         self.tail.setCurrentIndex(max(0, self.tail.findData(values.get("tail", "bottom_left"))))
+        self.tail_length = QDoubleSpinBox(); self.tail_length.setRange(5, 90); self.tail_length.setSuffix(" %"); self.tail_length.setValue(values.get("tail_length", 28.0))
+        self.tail_width = QDoubleSpinBox(); self.tail_width.setRange(4, 45); self.tail_width.setSuffix(" %"); self.tail_width.setValue(values.get("tail_width", 22.0))
         balloon_form = QFormLayout(); balloon_form.addRow("内側", self.balloon_fill); balloon_form.addRow("枠線", self.balloon_line)
-        balloon_form.addRow("枠線幅", self.balloon_width); balloon_form.addRow("しっぽ", self.tail)
+        balloon_form.addRow("枠線幅", self.balloon_width); balloon_form.addRow("しっぽ方向", self.tail)
+        balloon_form.addRow("しっぽの長さ", self.tail_length)
+        balloon_form.addRow("しっぽの付け根幅", self.tail_width)
+        tail_help = QLabel("作成後は吹き出しベクターレイヤーを選び、Kritaの図形編集ツールで尻尾の点を調整できます。")
+        tail_help.setWordWrap(True); tail_help.setStyleSheet("color:palette(mid);font-size:11px")
+        balloon_form.addRow("", tail_help)
         self.balloon_section = CollapsibleSection("吹き出し設定", balloon_form, self.current_kind == "吹き出し")
         self.balloon_section.setVisible(self.current_kind == "吹き出し")
         option_column.addWidget(self.balloon_section)
@@ -835,6 +1046,8 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.balloon_line.colorChanged.connect(self.update_preview)
         self.balloon_width.valueChanged.connect(self.update_preview)
         self.tail.currentIndexChanged.connect(self.update_preview)
+        self.tail_length.valueChanged.connect(self.update_preview)
+        self.tail_width.valueChanged.connect(self.update_preview)
         self.effect_color.colorChanged.connect(self.update_preview)
         self.effect_density.valueChanged.connect(self.update_preview)
         self.effect_width.valueChanged.connect(self.update_preview)
@@ -856,6 +1069,7 @@ class OnomatopoeiaMaterialDialog(QDialog):
                 "shadow": self.shadow.isChecked(), "burst": self.burst.isChecked(),
                 "balloon_fill": self.balloon_fill.color.name(), "balloon_line": self.balloon_line.color.name(),
                 "balloon_width": self.balloon_width.value(), "tail": self.tail.currentData(),
+                "tail_length": self.tail_length.value(), "tail_width": self.tail_width.value(),
                 "effect_color": self.effect_color.color.name(), "effect_density": self.effect_density.value(),
                 "effect_width": self.effect_width.value(),
                 "target": self.target.currentData()})
@@ -1081,17 +1295,20 @@ class OnomatopoeiaMaterialDialog(QDialog):
             if self.current_kind == "描き文字":
                 image = render_material(text, self.values(), width, height)
             elif self.current_kind == "吹き出し":
-                image = render_balloon(text, self.values(), width, height)
+                self.place_balloon_vector(document, text, self.values(), bounds, polygon)
+                image = None
             else:
                 image = render_effect(self.values(), width, height)
-            apply_polygon_mask(image, polygon, x, y)
+            if image is not None:
+                apply_polygon_mask(image, polygon, x, y)
             if self.current_kind == "描き文字":
                 layer_name = "描き文字：" + text[:24]
             elif self.current_kind == "吹き出し":
                 layer_name = "吹き出し" + (("：" + text[:24]) if text else "（空）")
             else:
                 layer_name = "効果線：" + self.current_preset
-            self.place_image(document, image, bounds, layer_name)
+            if image is not None:
+                self.place_image(document, image, bounds, layer_name)
             if text and self.current_kind == "描き文字":
                 recent = [text] + [word for word in self.recent_words if word != text]
                 self.recent_words = tuple(recent[:18])
@@ -1140,3 +1357,60 @@ class OnomatopoeiaMaterialDialog(QDialog):
         document.setActiveNode(layer)
         document.setModified(True)
         document.refreshProjection()
+
+    def place_balloon_vector(self, document, text, values, bounds, polygon=None):
+        """Create an editable balloon group with text above one united body/tail shape."""
+        group_name = "吹き出し" + (("：" + text[:24]) if text else "（空）")
+        group = document.createGroupLayer(group_name)
+        parent = self.destination_parent(document)
+        parent.addChildNode(group, None)
+        try:
+            balloon_layer = document.createVectorLayer("吹き出し本体・尻尾")
+            group.addChildNode(balloon_layer, None)
+            balloon_shapes = balloon_layer.addShapesFromSvg(balloon_svg(document, values, bounds))
+            if not balloon_shapes:
+                raise RuntimeError("編集可能な吹き出し形状を作成できませんでした")
+            for index, shape in enumerate(balloon_shapes):
+                shape.setName("吹き出し形状" if index == 0 else "吹き出し補助形状%d" % index)
+                shape.setSelectable(True)
+
+            active = balloon_layer
+            if text:
+                text_layer = document.createVectorLayer("テキスト：" + text[:24])
+                group.addChildNode(text_layer, balloon_layer)
+                text_shapes = text_layer.addShapesFromSvg(balloon_text_svg(document, text, values, bounds))
+                if not text_shapes:
+                    raise RuntimeError("編集可能なテキストを作成できませんでした")
+                for shape in text_shapes:
+                    shape.setName("吹き出しテキスト")
+                    shape.setSelectable(True)
+                active = text_layer
+
+            if polygon:
+                self.add_polygon_mask(document, group, polygon)
+            group.setCollapsed(False)
+            document.setActiveNode(active)
+            document.setModified(True)
+            document.refreshProjection()
+        except Exception:
+            parent.removeChildNode(group)
+            raise
+
+    @staticmethod
+    def add_polygon_mask(document, group, polygon):
+        x = max(0, int(math.floor(min(point[0] for point in polygon))))
+        y = max(0, int(math.floor(min(point[1] for point in polygon))))
+        right = min(document.width(), int(math.ceil(max(point[0] for point in polygon))))
+        bottom = min(document.height(), int(math.ceil(max(point[1] for point in polygon))))
+        width, height = right - x, bottom - y
+        if width <= 0 or height <= 0 or width * height > 100_000_000:
+            raise ValueError("コマのマスク範囲が不正です")
+        mask_image = QImage(width, height, QImage.Format_Grayscale8); mask_image.fill(0)
+        painter = QPainter(mask_image); painter.setPen(Qt.NoPen); painter.setBrush(Qt.white)
+        painter.drawPolygon(QPolygonF([QPointF(px - x, py - y) for px, py in polygon])); painter.end()
+        bits = mask_image.constBits(); bits.setsize(mask_image.byteCount()); raw = bytes(bits)
+        stride = mask_image.bytesPerLine()
+        packed = b"".join(raw[row * stride:row * stride + width] for row in range(height))
+        selection = Selection(); selection.setPixelData(QByteArray(packed), x, y, width, height)
+        mask = document.createTransparencyMask("コマ外を隠す")
+        group.addChildNode(mask, None); mask.setSelection(selection)
