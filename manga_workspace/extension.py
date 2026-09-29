@@ -1,6 +1,7 @@
 from krita import Extension, Krita
 from PyQt5.QtCore import Qt, QTimer, QByteArray, QEvent, QPoint, QSize
-from PyQt5.QtWidgets import QMenu, QToolBar, QApplication, QAbstractButton, QStyle
+from PyQt5.QtWidgets import (QMenu, QToolBar, QApplication, QAbstractButton, QStyle,
+                             QDockWidget, QScrollArea)
 from PyQt5.QtWidgets import QAction
 from .compact import CompactScroll, scroll_content
 from .onomatopoeia import OnomatopoeiaMaterialDialog, OnomatopoeiaSettingsDialog, make_icon
@@ -72,8 +73,15 @@ class WorkspaceExtension(Extension):
         menu.addAction("保存した配置に戻す", lambda: self.restore_layout(main))
         sound_menu = main.menuBar().addMenu("オノマトペ")
         sound_menu.setObjectName("manga_onomatopoeia_menu")
-        sound_menu.addAction(make_icon(), "漫画表現素材を作成…",
-                             lambda checked=False, m=main: self.open_onomatopoeia_material(m))
+        material_dock = self.install_onomatopoeia_panel(main)
+        sound_menu.addAction(material_dock.toggleViewAction())
+        sound_menu.addSeparator()
+        for kind, label in (("描き文字", "描き文字を作る"),
+                            ("吹き出し", "吹き出しを作る"),
+                            ("効果線", "効果線を作る")):
+            sound_menu.addAction(make_icon(32, kind[0]), label,
+                                 lambda checked=False, value=kind, m=main:
+                                 self.open_onomatopoeia_material(m, value))
         sound_menu.addAction("オノマトペ設定…",
                              lambda checked=False, m=main: self.open_onomatopoeia_settings(m))
         menu.addSeparator()
@@ -121,15 +129,48 @@ class WorkspaceExtension(Extension):
         toolbar.setOrientation(Qt.Vertical)
         toolbar.setIconSize(QSize(30, 30))
         toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        action = toolbar.addAction(make_icon(32), "オノマトペ素材")
-        action.setToolTip("描き文字・吹き出し・効果線を作成")
-        action.triggered.connect(lambda checked=False, m=main: self.open_onomatopoeia_material(m))
+        for kind, icon_text, tooltip in (
+                ("描き文字", "描", "描き文字・オノマトペを作成"),
+                ("吹き出し", "吹", "空の吹き出し・台詞入り吹き出しを作成"),
+                ("効果線", "線", "集中線・速度線・感情効果を作成")):
+            action = toolbar.addAction(make_icon(32, icon_text), kind)
+            action.setToolTip(tooltip)
+            action.triggered.connect(lambda checked=False, value=kind, m=main:
+                                     self.open_onomatopoeia_material(m, value))
         main.addToolBar(Qt.LeftToolBarArea, toolbar)
         toolbar.show()
 
     @staticmethod
-    def open_onomatopoeia_material(main):
-        OnomatopoeiaMaterialDialog(main).exec_()
+    def install_onomatopoeia_panel(main):
+        dock = main.findChild(QDockWidget, "manga_materials")
+        if dock:
+            return dock
+        dock = QDockWidget("漫画表現素材", main)
+        dock.setObjectName("manga_materials")
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable |
+                         QDockWidget.DockWidgetClosable)
+        editor = OnomatopoeiaMaterialDialog(dock, embedded=True)
+        editor.setObjectName("manga_materials_editor")
+        scroll = QScrollArea(dock)
+        scroll.setObjectName("manga_materials_scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(editor)
+        dock.setWidget(scroll)
+        dock.setMinimumWidth(320)
+        main.addDockWidget(Qt.RightDockWidgetArea, dock)
+        dock.hide()
+        return dock
+
+    @staticmethod
+    def open_onomatopoeia_material(main, kind=None):
+        dock = WorkspaceExtension.install_onomatopoeia_panel(main)
+        editor = dock.findChild(OnomatopoeiaMaterialDialog, "manga_materials_editor")
+        if editor and kind in ("描き文字", "吹き出し", "効果線"):
+            editor.kind.setCurrentText(kind)
+        dock.show()
+        dock.raise_()
 
     @staticmethod
     def open_onomatopoeia_settings(main):

@@ -117,7 +117,7 @@ def save_defaults(values):
         app.writeSetting(SECTION, name, str(value))
 
 
-def make_icon(size=32):
+def make_icon(size=32, label="ド"):
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
@@ -128,7 +128,7 @@ def make_icon(size=32):
     font = QFont(default_font_family(), max(9, size // 2))
     font.setBold(True)
     painter.setFont(font)
-    painter.drawText(0, 0, size, size, Qt.AlignCenter, "ド")
+    painter.drawText(0, 0, size, size, Qt.AlignCenter, label)
     painter.end()
     return QIcon(pixmap)
 
@@ -598,16 +598,21 @@ class OnomatopoeiaSettingsDialog(QDialog):
 
 
 class OnomatopoeiaMaterialDialog(QDialog):
-    def __init__(self, parent=None, initial_text="", fixed_bounds=None, fixed_parent_node=None):
+    def __init__(self, parent=None, initial_text="", fixed_bounds=None, fixed_parent_node=None,
+                 initial_kind=None, embedded=False):
         super().__init__(parent)
+        self.embedded = embedded
+        if embedded:
+            self.setWindowFlags(Qt.Widget)
         self.fixed_bounds = list(fixed_bounds) if fixed_bounds else None
         self.fixed_parent_node = fixed_parent_node
         self.library_word_selected = False
         self.setWindowTitle("オノマトペ・吹き出し素材")
-        self.setMinimumSize(820, 700)
-        self.resize(960, 820)
+        self.setMinimumSize(300, 560) if embedded else self.setMinimumSize(820, 700)
+        if not embedded:
+            self.resize(960, 820)
         values = load_defaults()
-        self.current_kind = values.get("kind", "描き文字")
+        self.current_kind = initial_kind or values.get("kind", "描き文字")
         if self.current_kind not in PRESET_GROUPS:
             self.current_kind = "描き文字"
         group = PRESET_GROUPS[self.current_kind]
@@ -625,7 +630,8 @@ class OnomatopoeiaMaterialDialog(QDialog):
         outer.addWidget(subtitle)
 
         self.preview = QLabel()
-        self.preview.setMinimumHeight(190)
+        self.preview.setMinimumHeight(130 if embedded else 190)
+        self.preview.setMaximumHeight(180 if embedded else 16777215)
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setStyleSheet(
             "QLabel{background:#f6f6f6;border:1px solid palette(mid);border-radius:5px;padding:8px}")
@@ -678,7 +684,7 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.word_section = CollapsibleSection("ことばを用途から選ぶ", word_layout, True)
         outer.addWidget(self.word_section)
 
-        body = QHBoxLayout()
+        body = QVBoxLayout() if embedded else QHBoxLayout()
         body.setSpacing(12)
         style_column = QVBoxLayout()
         style_column.addWidget(QLabel("スタイル"))
@@ -686,7 +692,7 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.preset_grid.setSpacing(6)
         preset_widget = QWidget(); preset_widget.setLayout(self.preset_grid)
         preset_scroll = QScrollArea(); preset_scroll.setWidgetResizable(True); preset_scroll.setWidget(preset_widget)
-        preset_scroll.setMinimumHeight(225)
+        preset_scroll.setMinimumHeight(210 if embedded else 225)
         style_column.addWidget(preset_scroll)
         style_column.addStretch(1)
         body.addLayout(style_column, 1)
@@ -805,7 +811,7 @@ class OnomatopoeiaMaterialDialog(QDialog):
         license_note.setStyleSheet("color:palette(mid);font-size:11px")
         external_layout.addWidget(license_note)
         outer.addWidget(CollapsibleSection("外部で取得した素材を使う", external_layout, False))
-        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.NoButton if embedded else QDialogButtonBox.Cancel)
         self.generate = QPushButton("原稿に素材レイヤーを作成")
         self.generate.setMinimumHeight(40)
         self.generate.setDefault(True)
@@ -1095,7 +1101,12 @@ class OnomatopoeiaMaterialDialog(QDialog):
                 if remembered["target"] == "fixed_region":
                     remembered["target"] = "selection"
                 save_defaults(remembered)
-            self.accept()
+            if not self.embedded:
+                self.accept()
+            else:
+                self.generate.setText("作成しました")
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(1200, lambda: self.generate.setText("原稿に素材レイヤーを作成"))
         except Exception as error:
             QMessageBox.warning(self, "オノマトペ素材", str(error))
 
@@ -1114,7 +1125,8 @@ class OnomatopoeiaMaterialDialog(QDialog):
             image = fit_external_material(load_external_material(path), width, height)
             apply_polygon_mask(image, polygon, x, y)
             self.place_image(document, image, bounds, "画像素材：" + Path(path).stem[:32])
-            self.accept()
+            if not self.embedded:
+                self.accept()
         except Exception as error:
             QMessageBox.warning(self, "画像素材を読み込む", str(error))
 
