@@ -1,4 +1,4 @@
-"""One-shot canvas placement without changing Krita's active native tool."""
+"""Continuous canvas material placement until explicitly cancelled."""
 import json
 from krita import Krita
 from PyQt5.QtCore import QObject, QEvent, Qt, QPointF, QMimeData
@@ -28,8 +28,8 @@ class MaterialButton(QToolButton):
                 drag = QDrag(self)
                 mime = QMimeData(); mime.setData(MIME, b'1'); drag.setMimeData(mime)
                 drag.setPixmap(self.icon().pixmap(116,58))
-                drag.exec_(Qt.CopyAction)
-                self.editor.placement.cancel()
+                if drag.exec_(Qt.CopyAction) != Qt.CopyAction:
+                    self.editor.placement.cancel()
             return
         super().mouseMoveEvent(event)
 
@@ -61,7 +61,7 @@ class MaterialPlacement(QObject):
         self.old_cursor = self.canvas.cursor()
         self.canvas.setAcceptDrops(True); self.canvas.setCursor(Qt.CrossCursor)
         QApplication.instance().installEventFilter(self)
-        self.editor.target_hint.setText('原稿をクリックで配置／ドラッグで大きさ指定。Esc・右クリックで取消')
+        self.editor.target_hint.setText('連続配置中：クリックで配置／ドラッグで大きさ指定。Esc・右クリック・別ツールで終了')
         return True
 
     def cancel(self):
@@ -73,6 +73,7 @@ class MaterialPlacement(QObject):
             except RuntimeError:
                 pass
         self.canvas = self.view = self.document = self.start = None
+        self.editor.update_target_hint()
 
     def point(self, point):
         inverse, ok = self.view.flakeToCanvasTransform().inverted()
@@ -98,10 +99,13 @@ class MaterialPlacement(QObject):
             x,y = end[0]-w/2,end[1]-h/2
         w,h = min(doc.width(),max(32,w)),min(doc.height(),max(32,h))
         x,y = max(0,min(x,doc.width()-w)),max(0,min(y,doc.height()-h))
-        self.cancel()
+        self.start = None
         self.editor.placement_override = ([round(x),round(y),round(w),round(h)],polygon,panel.get('node') if panel else None)
         try: self.editor.create_layer()
-        finally: self.editor.placement_override = None
+        finally:
+            self.editor.placement_override = None
+            if self.canvas:
+                self.canvas.setCursor(Qt.CrossCursor)
 
     def eventFilter(self, obj, event):
         try:
