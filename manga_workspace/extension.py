@@ -1,11 +1,19 @@
 from krita import Extension, Krita
 from PyQt5.QtCore import Qt, QTimer, QByteArray, QEvent, QPoint, QSize
 from PyQt5.QtWidgets import (QMenu, QToolBar, QApplication, QAbstractButton, QStyle,
-                             QDockWidget, QScrollArea)
+                             QDockWidget, QScrollArea, QWidget, QVBoxLayout)
 from PyQt5.QtWidgets import QAction
 from .compact import CompactScroll, scroll_content
-from .onomatopoeia import OnomatopoeiaMaterialDialog, OnomatopoeiaSettingsDialog, make_icon
+from .onomatopoeia import OnomatopoeiaMaterialWidget, OnomatopoeiaSettingsDialog, make_icon
 from .updater import UpdateDialog, UpdateManager
+from .material_tools import MaterialTools
+
+
+class MaterialDock(QDockWidget):
+    def showEvent(self, event):
+        super().showEvent(event)
+        # A restored floating dock can remain visible with painting disabled.
+        self.setUpdatesEnabled(True)
 
 
 class WorkspaceExtension(Extension):
@@ -121,23 +129,25 @@ class WorkspaceExtension(Extension):
         # explicitly apply or restore the manga layout from the menu.
 
     def install_onomatopoeia_tool(self, main):
-        """Add a stable vertical tool beside Krita's native left toolbox."""
-        if main.findChild(QToolBar, "manga_onomatopoeia_toolbar"):
+        """Keep material shortcuts inside the native toolbox dock."""
+        if main.findChild(QWidget, "manga_onomatopoeia_toolbar"):
             return
-        toolbar = QToolBar("オノマトペ", main)
-        toolbar.setObjectName("manga_onomatopoeia_toolbar")
-        toolbar.setOrientation(Qt.Vertical)
-        toolbar.setIconSize(QSize(30, 30))
-        toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        for kind, icon_text, tooltip in (
-                ("描き文字", "描", "描き文字・オノマトペを作成"),
-                ("吹き出し", "吹", "空の吹き出し・台詞入り吹き出しを作成"),
-                ("効果線", "線", "集中線・速度線・感情効果を作成")):
-            action = toolbar.addAction(make_icon(32, icon_text), kind)
-            action.setToolTip(tooltip)
-            action.triggered.connect(lambda checked=False, value=kind, m=main:
-                                     self.open_onomatopoeia_material(m, value))
-        main.addToolBar(Qt.LeftToolBarArea, toolbar)
+        toolbar = MaterialTools(main, make_icon,
+                                lambda kind: self.open_onomatopoeia_material(main,kind))
+        toolbox = next((dock for dock in main.findChildren(QDockWidget)
+                        if 'toolbox' in dock.objectName().lower()),None)
+        if toolbox and toolbox.widget():
+            native = toolbox.widget()
+            native.setParent(None)
+            container = QWidget(toolbox)
+            layout = QVBoxLayout(container); layout.setContentsMargins(0,0,0,0); layout.setSpacing(2)
+            layout.addWidget(toolbar); layout.addWidget(native)
+            toolbox.setWidget(container)
+        else:
+            fallback = QDockWidget("漫画素材ツール",main)
+            fallback.setObjectName("manga_material_tools_dock")
+            fallback.setWidget(toolbar)
+            main.addDockWidget(Qt.LeftDockWidgetArea,fallback)
         toolbar.show()
 
     @staticmethod
@@ -145,12 +155,12 @@ class WorkspaceExtension(Extension):
         dock = main.findChild(QDockWidget, "manga_materials")
         if dock:
             return dock
-        dock = QDockWidget("漫画表現素材", main)
+        dock = MaterialDock("漫画表現素材", main)
         dock.setObjectName("manga_materials")
         dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable |
                          QDockWidget.DockWidgetClosable)
-        editor = OnomatopoeiaMaterialDialog(dock, embedded=True)
+        editor = OnomatopoeiaMaterialWidget(dock)
         editor.setObjectName("manga_materials_editor")
         scroll = QScrollArea(dock)
         scroll.setObjectName("manga_materials_scroll")
@@ -166,10 +176,13 @@ class WorkspaceExtension(Extension):
     @staticmethod
     def open_onomatopoeia_material(main, kind=None):
         dock = WorkspaceExtension.install_onomatopoeia_panel(main)
-        editor = dock.findChild(OnomatopoeiaMaterialDialog, "manga_materials_editor")
+        editor = dock.findChild(OnomatopoeiaMaterialWidget, "manga_materials_editor")
         if editor and kind in ("描き文字", "吹き出し", "効果線"):
             editor.kind.setCurrentText(kind)
+        if editor:
+            editor.show()
         dock.show()
+        dock.setUpdatesEnabled(True)
         dock.raise_()
 
     @staticmethod

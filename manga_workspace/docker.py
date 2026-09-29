@@ -367,35 +367,22 @@ class MangaDocker(DockWidget):
         common.addWidget(self.negative)
         layout.addWidget(self.common_prompt_section)
 
-        layout.addWidget(section(QLabel("範囲指定と個別プロンプト")))
-        selection_help = muted(QLabel(
-            "Kritaの矩形選択後：背景や単体画像は①、複数人物の配置指定は②を使います。"))
-        selection_help.setWordWrap(True)
-        layout.addWidget(selection_help)
-        target_selection = QPushButton("① 選択範囲だけを生成する")
-        target_selection.setToolTip(
-            "点線で囲んだ範囲を生成対象にし、全体プロンプト入力欄を開きます。人物だけ・背景だけの生成にも使用できます")
-        target_selection.clicked.connect(self.use_selection_as_target)
-        layout.addWidget(target_selection)
-        self.buttons.append(target_selection)
         placement_row = QHBoxLayout()
-        character_button = QPushButton("② 人物の配置範囲を追加")
-        character_button.setToolTip("複数人物を描き分けるため、選択範囲を人物Promptの領域として追加します")
-        character_button.clicked.connect(lambda checked=False: self.add_from_selection("character"))
-        placement_row.addWidget(character_button)
-        self.buttons.append(character_button)
-        object_button = QPushButton("物体の配置範囲を追加")
-        object_button.setToolTip("選択範囲を物体Promptの領域として追加します")
-        object_button.clicked.connect(lambda checked=False: self.add_from_selection("object"))
-        placement_row.addWidget(object_button)
-        self.buttons.append(object_button)
+        self.selection_action = QComboBox()
+        self.selection_action.setAccessibleName("選択範囲の用途")
+        self.selection_action.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.selection_action.setMinimumContentsLength(8)
+        for label, kind in (("生成対象にする", "target"),
+                            ("人物範囲を追加", "character"),
+                            ("物体範囲を追加", "object"),
+                            ("背景範囲を追加", "background"),
+                            ("文字・オノマトペ範囲を追加", "text")):
+            self.selection_action.addItem(label, kind)
+        self.selection_action.setToolTip("キャンバスで選択した範囲の用途を選び、適用を押します")
+        placement_row.addWidget(self.selection_action, 1)
+        self.buttons.append(self.selection_action)
+        self.button(placement_row, "適用", self.apply_selection_action)
         layout.addLayout(placement_row)
-        text_button = QPushButton("③ 文字・オノマトペ領域を追加")
-        text_button.setToolTip(
-            "選択範囲を文字領域として追加し、台詞・オノマトペ・効果音などの分類と描画方法を設定します")
-        text_button.clicked.connect(lambda checked=False: self.add_from_selection("text"))
-        layout.addWidget(text_button)
-        self.buttons.append(text_button)
 
         layout.addWidget(section(QLabel("自動検出（任意）")))
         self.detector = DetectionController(self)
@@ -1064,6 +1051,13 @@ class MangaDocker(DockWidget):
             self._state["target"] = bounds
             self.persist()
 
+    def apply_selection_action(self):
+        kind = self.selection_action.currentData()
+        if kind == "target":
+            self.use_selection_as_target()
+        else:
+            self.add_from_selection(kind)
+
     def use_selection_as_target(self):
         bounds = self.selection_bounds()
         if not bounds or self._state is None:
@@ -1083,8 +1077,8 @@ class MangaDocker(DockWidget):
         bounds = self.selection_bounds()
         if bounds:
             region = metadata.add_region(self._state, bounds)
-            region["kind"] = kind if kind in ("character", "object", "text") else "character"
-            label = {"character": "人物", "object": "物体", "text": "文字"}[region["kind"]]
+            region["kind"] = kind if kind in ("character", "object", "background", "text") else "character"
+            label = {"character": "人物", "object": "物体", "background": "背景", "text": "文字"}[region["kind"]]
             count = sum(1 for item in self._state["regions"] if item.get("kind") == region["kind"])
             region["name"] = "%s %d" % (label, count)
             if region["kind"] == "text":

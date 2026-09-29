@@ -16,9 +16,25 @@ from PyQt5.QtWidgets import (
 )
 
 from .asset_library import EFFECT_PRESETS, WORD_LIBRARY, WORD_CATEGORY_KEYWORDS
+from .material_placement import MaterialButton, MaterialPlacement
 
 
 SECTION = "manga_workspace_onomatopoeia"
+
+class MaterialPreview(QLabel):
+    def setPixmap(self, pixmap):
+        self.source_pixmap = pixmap
+        self.fit_preview()
+
+    def fit_preview(self):
+        if hasattr(self, 'source_pixmap'):
+            size = self.contentsRect().size() - QSize(16,16)
+            super().setPixmap(self.source_pixmap.scaled(size,Qt.KeepAspectRatio,Qt.SmoothTransformation))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_preview()
+
 EXTERNAL_MATERIAL_SITES = (
     ("DDD FONT（擬音・効果音）", "https://dddfont.com/", "https://dddfont.com/term/"),
     ("マンガパーツSTOCK（集中線・効果線）", "https://mangasozai.com/", "https://mangasozai.com/terms"),
@@ -798,7 +814,21 @@ class OnomatopoeiaSettingsDialog(QDialog):
         self.accept()
 
 
-class OnomatopoeiaMaterialDialog(QDialog):
+class MaterialEditorMixin:
+    def done(self, result):
+        if getattr(self, 'embedded', False):
+            if hasattr(self, 'placement'):
+                self.placement.cancel()
+            return
+        super().done(result)
+
+    def reject(self):
+        if getattr(self, 'embedded', False):
+            if hasattr(self, 'placement'):
+                self.placement.cancel()
+            return
+        super().reject()
+
     def __init__(self, parent=None, initial_text="", fixed_bounds=None, fixed_parent_node=None,
                  initial_kind=None, embedded=False):
         super().__init__(parent)
@@ -825,15 +855,17 @@ class OnomatopoeiaMaterialDialog(QDialog):
 
         title = QLabel("漫画表現素材を作成")
         title.setStyleSheet("font-size:18px;font-weight:700")
-        subtitle = QLabel("作りたいもの、用途、見本の順に選びます。すべてKrita内でローカル生成できます。")
+        subtitle = QLabel("見本を選んで原稿をクリック、または見本を原稿へドラッグして配置。Escで取消。")
+        subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color:palette(text)")
         outer.addWidget(title)
         outer.addWidget(subtitle)
 
-        self.preview = QLabel()
+        self.preview = MaterialPreview()
         self.preview.setMinimumHeight(130 if embedded else 190)
         self.preview.setMaximumHeight(180 if embedded else 16777215)
         self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.preview.setStyleSheet(
             "QLabel{background:#f6f6f6;border:1px solid palette(mid);border-radius:5px;padding:8px}")
         outer.addWidget(self.preview, 1)
@@ -893,8 +925,13 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.preset_grid.setSpacing(6)
         preset_widget = QWidget(); preset_widget.setLayout(self.preset_grid)
         preset_scroll = QScrollArea(); preset_scroll.setWidgetResizable(True); preset_scroll.setWidget(preset_widget)
-        preset_scroll.setMinimumHeight(210 if embedded else 225)
-        style_column.addWidget(preset_scroll)
+        if embedded:
+            preset_scroll.takeWidget()
+            preset_scroll.deleteLater()
+            style_column.addWidget(preset_widget)
+        else:
+            preset_scroll.setMinimumHeight(225)
+            style_column.addWidget(preset_scroll)
         style_column.addStretch(1)
         body.addLayout(style_column, 1)
 
@@ -1061,6 +1098,8 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.word_search.textChanged.connect(self.rebuild_word_buttons)
         self.target.currentIndexChanged.connect(self.update_target_hint)
         self.rebuild_word_buttons()
+        self.placement = MaterialPlacement(self)
+        self.placement_override = None
         self.rebuild_preset_buttons()
         self.update_material_site_actions()
         self.update_target_hint()
@@ -1136,9 +1175,11 @@ class OnomatopoeiaMaterialDialog(QDialog):
             label.setStyleSheet("color:palette(mid)"); self.word_grid.addWidget(label, 0, 0, 1, 4)
             return
         for index, word in enumerate(words):
-            button = QPushButton(word); button.setMinimumHeight(28)
-            button.setToolTip("クリックして文字欄へ入力")
+            button = MaterialButton(self,word,word=True); button.setText(word); button.setMinimumHeight(28)
+            button.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed)
+            button.setToolTip("クリックして原稿へ配置／原稿へドラッグ")
             button.clicked.connect(lambda checked=False, value=word: self.choose_library_word(value))
+            button.clicked.connect(lambda checked=False: self.placement.arm())
             self.word_grid.addWidget(button, index // 6, index % 6)
 
     def choose_library_word(self, word):
@@ -1152,11 +1193,13 @@ class OnomatopoeiaMaterialDialog(QDialog):
                 item.widget().deleteLater()
         self.preset_buttons = {}
         for index, name in enumerate(PRESET_GROUPS[self.current_kind]):
-            button = QToolButton(); button.setText(name); button.setCheckable(True)
+            button = MaterialButton(self, name); button.setText(name); button.setCheckable(True)
             button.setChecked(name == self.current_preset)
             button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             button.setIconSize(QSize(116, 58)); button.setMinimumSize(130, 88)
             button.clicked.connect(lambda checked=False, value=name: self.select_preset(value))
+            button.clicked.connect(lambda checked=False: self.placement.arm())
+            button.setToolTip(name + "：クリックして原稿へ配置／原稿へドラッグ")
             self.preset_buttons[name] = button
             self.preset_grid.addWidget(button, index // 2, index % 2)
         self.refresh_preset_icons()
@@ -1182,15 +1225,21 @@ class OnomatopoeiaMaterialDialog(QDialog):
                            "機械": "ピピッ", "重低音": "ズン", "静寂": "シーン", "きらめき": "キラリ", "コミカル": "ポン"}
         base = self.values()
         for name, button in self.preset_buttons.items():
+            button.setProperty('sample_text',lettering_words.get(name,'ドン'))
             preview_values = dict(base)
             preview_values["preset"] = name
             preview_values.update(PRESET_GROUPS[self.current_kind][name])
             if self.current_kind == "描き文字":
-                image = render_material(lettering_words.get(name, "文字"), preview_values, 116, 58)
+                image = render_material(lettering_words.get(name, "文字"), preview_values, 464, 232)
             elif self.current_kind == "吹き出し":
-                image = render_balloon("", preview_values, 116, 58)
+                image = render_balloon("", preview_values, 464, 232)
             else:
-                image = render_effect(preview_values, 116, 58)
+                image = render_effect(preview_values, 464, 232)
+            image = image.scaled(116,58,Qt.KeepAspectRatio,Qt.SmoothTransformation)
+            background = QImage(116,58,QImage.Format_ARGB32)
+            background.fill(QColor('#b0b0b0'))
+            painter = QPainter(background); painter.drawImage(0,0,image); painter.end()
+            image = background
             button.setIcon(QIcon(QPixmap.fromImage(image)))
 
     def update_target_hint(self, *args):
@@ -1239,6 +1288,8 @@ class OnomatopoeiaMaterialDialog(QDialog):
         return dock.current() if dock and getattr(dock, "document", None) == document else None
 
     def target_geometry(self, document):
+        if getattr(self, 'placement_override', None):
+            return self.placement_override[:2]
         mode = self.target.currentData()
         polygon = None
         if mode == "fixed_region" and self.fixed_bounds:
@@ -1266,6 +1317,10 @@ class OnomatopoeiaMaterialDialog(QDialog):
 
     def destination_parent(self, document):
         root = document.rootNode()
+        override = getattr(self, 'placement_override', None)
+        if override:
+            from .panels import node_by_id
+            return node_by_id(document, override[2]) or root if override[2] else root
         wanted_node = self.fixed_parent_node
         if not wanted_node and self.target.currentData() == "current_panel":
             panel = self.current_panel(document)
@@ -1420,3 +1475,15 @@ class OnomatopoeiaMaterialDialog(QDialog):
         selection = Selection(); selection.setPixelData(QByteArray(packed), x, y, width, height)
         mask = document.createTransparencyMask("コマ外を隠す")
         group.addChildNode(mask, None); mask.setSelection(selection)
+
+
+class OnomatopoeiaMaterialDialog(MaterialEditorMixin, QDialog):
+    """Standalone modal editor used by fixed AI regions."""
+    pass
+
+
+class OnomatopoeiaMaterialWidget(MaterialEditorMixin, QWidget):
+    """Ordinary child widget for docks, rather than a nested dialog window."""
+    def __init__(self, parent=None, **kwargs):
+        kwargs['embedded'] = True
+        super().__init__(parent, **kwargs)
