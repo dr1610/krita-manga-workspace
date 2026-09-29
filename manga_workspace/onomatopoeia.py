@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QToolButton, QWidget, QScrollArea, QSizePolicy, QFileDialog,
 )
 
-from .asset_library import EFFECT_PRESETS, WORD_LIBRARY
+from .asset_library import EFFECT_PRESETS, WORD_LIBRARY, WORD_CATEGORY_KEYWORDS
 
 
 SECTION = "manga_workspace_onomatopoeia"
@@ -602,6 +602,7 @@ class OnomatopoeiaMaterialDialog(QDialog):
         super().__init__(parent)
         self.fixed_bounds = list(fixed_bounds) if fixed_bounds else None
         self.fixed_parent_node = fixed_parent_node
+        self.library_word_selected = False
         self.setWindowTitle("オノマトペ・吹き出し素材")
         self.setMinimumSize(820, 700)
         self.resize(960, 820)
@@ -701,7 +702,13 @@ class OnomatopoeiaMaterialDialog(QDialog):
             self.target.insertItem(0, "選択した文字領域", "fixed_region")
             self.target.setCurrentIndex(0)
         else:
-            self.target.setCurrentIndex(max(0, self.target.findData(values["target"])))
+            preferred_target = values["target"]
+            document = Krita.instance().activeDocument()
+            selection = document.selection() if document else None
+            has_selection = bool(selection and selection.width() > 0 and selection.height() > 0)
+            if preferred_target == "selection" and not has_selection:
+                preferred_target = "current_panel" if document and self.current_panel(document) else "page_center"
+            self.target.setCurrentIndex(max(0, self.target.findData(preferred_target)))
         self.bold = QCheckBox("太字"); self.bold.setChecked(values["bold"])
         self.vertical = QCheckBox("縦書き"); self.vertical.setChecked(values["vertical"])
         self.shadow = QCheckBox("影"); self.shadow.setChecked(values["shadow"])
@@ -709,11 +716,12 @@ class OnomatopoeiaMaterialDialog(QDialog):
         effects = QHBoxLayout()
         for widget in (self.bold, self.vertical, self.shadow, self.burst): effects.addWidget(widget)
 
-        text_form = QFormLayout()
+        text_form = QFormLayout(); self.text_form = text_form
         text_form.addRow("フォント", self.font)
         text_form.addRow("文字色", self.fill)
-        text_form.addRow("縁取り色", self.outline_color)
-        text_form.addRow("縁取り幅", self.outline)
+        self.outline_color_label = QLabel("縁取り色"); self.outline_width_label = QLabel("縁取り幅")
+        text_form.addRow(self.outline_color_label, self.outline_color)
+        text_form.addRow(self.outline_width_label, self.outline)
         self.text_section = CollapsibleSection("文字と縁取り", text_form, True)
         option_column.addWidget(self.text_section)
 
@@ -748,6 +756,13 @@ class OnomatopoeiaMaterialDialog(QDialog):
         self.word_section.setVisible(self.current_kind == "描き文字")
         self.text_section.setVisible(initial_uses_text)
         self.transform_section.setVisible(self.current_kind == "描き文字")
+        if self.current_kind == "吹き出し":
+            self.text_label.setText("文字（任意）")
+            self.text.setPlaceholderText("空のまま作成できます。必要な場合だけ台詞を入力")
+            self.text_section.toggle.setText("吹き出し内の文字（任意）")
+            for widget in (self.outline_color_label, self.outline_color,
+                           self.outline_width_label, self.outline):
+                widget.hide()
 
         placement_form = QFormLayout()
         placement_form.addRow("配置先", self.target)
@@ -841,14 +856,28 @@ class OnomatopoeiaMaterialDialog(QDialog):
         return result
 
     def change_kind(self, kind):
+        previous_kind = self.current_kind
         self.current_kind = kind
         self.current_preset = next(iter(PRESET_GROUPS[kind]))
         for name, button in self.mode_buttons.items():
             button.setChecked(name == kind)
         uses_text = kind != "効果線"
         self.text_label.setVisible(uses_text); self.text.setVisible(uses_text)
+        if kind == "吹き出し":
+            self.text_label.setText("文字（任意）")
+            self.text.setPlaceholderText("空のまま作成できます。必要な場合だけ台詞を入力")
+            if previous_kind == "描き文字" and self.library_word_selected:
+                self.text.clear(); self.library_word_selected = False
+        elif kind == "描き文字":
+            self.text_label.setText("文字")
+            self.text.setPlaceholderText("自由入力、または下の候補から選択")
         self.word_section.setVisible(kind == "描き文字")
         self.text_section.setVisible(uses_text)
+        balloon_text = kind == "吹き出し"
+        self.text_section.toggle.setText("吹き出し内の文字（任意）" if balloon_text else "文字と縁取り")
+        for widget in (self.outline_color_label, self.outline_color,
+                       self.outline_width_label, self.outline):
+            widget.setVisible(not balloon_text)
         self.transform_section.setVisible(kind == "描き文字")
         self.balloon_section.setVisible(kind == "吹き出し")
         self.effect_section.setVisible(kind == "効果線")
@@ -866,7 +895,8 @@ class OnomatopoeiaMaterialDialog(QDialog):
         if query:
             words = []
             for category, entries in WORD_LIBRARY.items():
-                if query in category.lower():
+                keywords = WORD_CATEGORY_KEYWORDS.get(category, "")
+                if query in category.lower() or query in keywords.lower():
                     words.extend(entries)
                 else:
                     words.extend(word for word in entries if query in word.lower())
@@ -882,8 +912,12 @@ class OnomatopoeiaMaterialDialog(QDialog):
         for index, word in enumerate(words):
             button = QPushButton(word); button.setMinimumHeight(28)
             button.setToolTip("クリックして文字欄へ入力")
-            button.clicked.connect(lambda checked=False, value=word: self.text.setText(value))
+            button.clicked.connect(lambda checked=False, value=word: self.choose_library_word(value))
             self.word_grid.addWidget(button, index // 6, index % 6)
+
+    def choose_library_word(self, word):
+        self.library_word_selected = True
+        self.text.setText(word)
 
     def rebuild_preset_buttons(self):
         while self.preset_grid.count():
@@ -1006,13 +1040,19 @@ class OnomatopoeiaMaterialDialog(QDialog):
 
     def destination_parent(self, document):
         root = document.rootNode()
-        if self.fixed_parent_node:
+        wanted_node = self.fixed_parent_node
+        if not wanted_node and self.target.currentData() == "current_panel":
+            panel = self.current_panel(document)
+            wanted_node = panel.get("node") if panel else None
+        if wanted_node:
             pending = [root]
             while pending:
                 candidate = pending.pop()
-                if candidate.uniqueId().toString() == self.fixed_parent_node:
+                if candidate.uniqueId().toString() == wanted_node:
                     return candidate
                 pending.extend(candidate.childNodes())
+        if self.target.currentData() == "page_center":
+            return root
         node = document.activeNode()
         while node and node != root:
             if node.type() == "grouplayer" and node.name().startswith("コマ"):
