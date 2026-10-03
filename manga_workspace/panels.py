@@ -15,6 +15,7 @@ from .interaction import (CanvasSelection, identity, drawing_nodes, editable,
                           hit_layer, BRUSH, MOVE, TRANSFORM, PICKABLE_TYPES)
 
 KEY = "manga_workspace/frames-v1"
+PANEL_COLOR_LABEL = 3
 
 
 def node_by_id(document, identity):
@@ -322,6 +323,8 @@ class PanelDocker(DockWidget):
                 self.data = json.loads(raw) if raw else {"version": 1, "panels": [], "history": []}
                 if self.data.get("version") != 1 or not isinstance(self.data.get("panels"), list):
                     raise ValueError("コマ情報の形式が未対応です。元データを保持します")
+                if self.reconcile_group_names():
+                    self.save_annotation()
                 self.status.setText("コマを選択")
         except Exception as error:
             self.data = None
@@ -341,8 +344,10 @@ class PanelDocker(DockWidget):
         self.list.clear()
         thumb = self.document.thumbnail(640,640) if self.document and self.active_panels() else None
         for i, panel in enumerate(self.active_panels()):
-            item = QListWidgetItem("%02d" % (i+1))
+            item = QListWidgetItem("コマ %02d" % (i+1))
             item.setData(Qt.UserRole, panel["id"])
+            group = node_by_id(self.document, panel["node"])
+            item.setToolTip("%s\nクリックでこのコマの描画レイヤーを選択" % group.name())
             self.set_thumbnail(item, panel, thumb)
             self.list.addItem(item)
             if panel["id"] == identity:
@@ -409,9 +414,50 @@ class PanelDocker(DockWidget):
             self.status.setText("コマはありません。基本枠を作成できます")
         self.update_highlight()
 
-    def persist(self):
+    def save_annotation(self):
         self.document.setAnnotation(KEY, "漫画コマ枠", QByteArray(json.dumps(self.data).encode("utf-8")))
         self.document.setModified(True)
+
+    def reconcile_group_names(self):
+        """Number managed frame folders without taking over user-renamed folders."""
+        if not self.document or not self.data:
+            return False
+        changed = False
+        number = 0
+        for panel in self.data["panels"]:
+            group = node_by_id(self.document, panel["node"])
+            if not group:
+                continue
+            if panel.get("active", True):
+                number += 1
+                desired = "コマ %02d" % number
+            else:
+                previous = panel.get("managed_name", "コマ " + panel["id"][:8])
+                if previous.startswith("分割前｜"):
+                    previous = previous[len("分割前｜"):]
+                desired = "分割前｜" + previous
+            managed = panel.get("managed_name")
+            legacy = "コマ " + panel["id"][:8]
+            is_managed = group.name() == managed if managed is not None else group.name() == legacy
+            if not is_managed:
+                # Krita's layer docker permits renaming; preserve those edits.
+                continue
+            if group.name() != desired:
+                group.setName(desired)
+                changed = True
+            if managed != desired:
+                panel["managed_name"] = desired
+                changed = True
+            if not panel.get("color_label_initialized"):
+                if group.colorLabel() == 0:
+                    group.setColorLabel(PANEL_COLOR_LABEL)
+                panel["color_label_initialized"] = True
+                changed = True
+        return changed
+
+    def persist(self):
+        self.reconcile_group_names()
+        self.save_annotation()
         self.document.refreshProjection()
         self.refresh()
         for widget in QApplication.allWidgets():
@@ -423,7 +469,8 @@ class PanelDocker(DockWidget):
         if doc.colorModel() != "RGBA" or doc.colorDepth() != "U8":
             raise ValueError("現在のコマ枠描画はRGB/Alpha・8bit原稿に対応しています")
         identity = str(uuid4())
-        group = doc.createGroupLayer("コマ " + identity[:8])
+        initial_name = "コマ " + identity[:8]
+        group = doc.createGroupLayer(initial_name)
         doc.rootNode().addChildNode(group, None)
         try:
             if source:
@@ -438,7 +485,8 @@ class PanelDocker(DockWidget):
             width = self.line.value() * doc.resolution() / 25.4
             mask, frame = self.build_shape(poly, group, width)
             return {"id":identity,"polygon":poly,"node":group.uniqueId().toString(),
-                    "mask":mask.uniqueId().toString(),"frame":frame.uniqueId().toString(),"active":True,"width":width}
+                    "mask":mask.uniqueId().toString(),"frame":frame.uniqueId().toString(),
+                    "active":True,"width":width,"managed_name":initial_name}
         except Exception:
             group.remove()
             raise

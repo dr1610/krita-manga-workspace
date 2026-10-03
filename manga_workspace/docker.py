@@ -3,16 +3,17 @@ import random
 import threading
 import time
 from krita import Krita, DockWidget, Selection
-from PyQt5.QtCore import QByteArray, Qt, QPointF, QEvent, QTimer, QObject, pyqtSignal
+from PyQt5.QtCore import QByteArray, QBuffer, QIODevice, Qt, QPointF, QEvent, QTimer, QObject, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QImage, QPixmap, QPolygonF
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QMessageBox, QComboBox,
     QSpinBox, QDoubleSpinBox, QTabWidget, QGroupBox, QApplication, QCheckBox,
-    QToolButton, QProgressBar, QAbstractButton
+    QToolButton, QProgressBar, QAbstractButton, QFileDialog
 )
 from . import state as metadata
 from . import comfy_backend
+from . import bfs_backend
 from .compact import scroll_content
 from .prompt_edit import TagPromptEdit
 from .detection_ui import DetectionController
@@ -263,6 +264,8 @@ class MangaDocker(DockWidget):
         self.region_negative.textChanged.connect(self.update_prompt_summaries)
         self.target_mode.currentIndexChanged.connect(self.change_target_mode)
         self.model.currentTextChanged.connect(self.edit_generation)
+        self.generation_mode.currentIndexChanged.connect(self.edit_bfs_settings)
+        self.bfs_reference_path.textChanged.connect(self.edit_bfs_settings)
         self.seed.valueChanged.connect(self.edit_generation)
         self.steps.valueChanged.connect(self.edit_generation)
         self.guidance.valueChanged.connect(self.edit_generation)
@@ -326,6 +329,20 @@ class MangaDocker(DockWidget):
         self.target_mode.addItem("選択範囲", "selection")
         self.target_mode.addItem("ページ全体", "full_page")
         form.addRow("対象", self.target_mode)
+        self.generation_mode = QComboBox()
+        self.generation_mode.addItem("通常", "standard")
+        self.generation_mode.addItem("BFS 頭部", "head")
+        self.generation_mode.addItem("BFS 全身", "body")
+        self.generation_mode.setToolTip("BFSは参照画像の人物を原稿の対象範囲へ反映します")
+        mode_row = QWidget()
+        mode_layout = QHBoxLayout(mode_row)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.addWidget(self.generation_mode, 1)
+        settings_button = QPushButton("⚙")
+        settings_button.setToolTip("AI作画の接続・生成・Tag補完設定を開く")
+        settings_button.clicked.connect(self.open_settings)
+        mode_layout.addWidget(settings_button)
+        form.addRow("方式", mode_row)
         self.model = QComboBox()
         model_row = QWidget()
         model_layout = QHBoxLayout(model_row)
@@ -335,20 +352,46 @@ class MangaDocker(DockWidget):
         refresh_models.setToolTip("ComfyUIに登録されたCheckpointを再読込")
         refresh_models.clicked.connect(self.reload_models)
         model_layout.addWidget(refresh_models)
-        settings_button = QPushButton("⚙ 設定")
-        settings_button.setToolTip("AI作画の接続・生成・Tag補完設定を開く")
-        settings_button.clicked.connect(self.open_settings)
-        model_layout.addWidget(settings_button)
         form.addRow("モデル", model_row)
+        self.model_row = model_row
+        self.model_label = form.labelForField(model_row)
         self.reload_models()
+        reference_row = QWidget()
+        reference_layout = QHBoxLayout(reference_row)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        self.bfs_reference_path = QLineEdit()
+        self.bfs_reference_path.setReadOnly(True)
+        self.bfs_reference_path.setPlaceholderText("キャラの参照画像を選択")
+        self.bfs_reference_path.setToolTip("PNG・JPG。設定中のComfyUIへ生成時に送信します")
+        reference_layout.addWidget(self.bfs_reference_path, 1)
+        choose_reference = QPushButton("選ぶ…")
+        choose_reference.clicked.connect(self.choose_bfs_reference)
+        reference_layout.addWidget(choose_reference)
+        self.bfs_reference_button = choose_reference
+        form.addRow("参照画像", reference_row)
+        self.bfs_reference_row = reference_row
+        self.bfs_reference_label = form.labelForField(reference_row)
         layout.addLayout(form)
+        self.bfs_help_section = CollapsibleSection(
+            "BFSの説明", self.read_section_state("bfs_help", False),
+            lambda expanded: self.save_section_state("bfs_help", expanded))
+        self.bfs_help_section.summary.hide()
+        self.bfs_hint = muted(QLabel(
+            "編集対象は上の『対象』で指定し、参照画像の人物を合わせます。"
+            "Qwen Image 2.1と対応BFS LoRAが必要です。"
+            "CFGは1固定。個別領域プロンプトは使用しません。"))
+        self.bfs_hint.setWordWrap(True)
+        self.bfs_help_section.content_layout.addWidget(self.bfs_hint)
+        layout.addWidget(self.bfs_help_section)
+        self.update_bfs_ui()
 
         common_expanded = self.read_section_state("common_prompt", True)
         self.common_prompt_section = CollapsibleSection(
             "全体・除外プロンプト", common_expanded,
             lambda expanded: self.save_section_state("common_prompt", expanded))
         common = self.common_prompt_section.content_layout
-        common.addWidget(section(QLabel("全体プロンプト（必須・日本語入力可）")))
+        self.common_prompt_label = section(QLabel("全体プロンプト（必須・日本語入力可）"))
+        common.addWidget(self.common_prompt_label)
         self.scene = TagPromptEdit()
         self.scene.setMinimumHeight(92)
         self.scene.setMaximumHeight(132)
@@ -356,7 +399,8 @@ class MangaDocker(DockWidget):
         self.scene.setToolTip("対象全体に共通する人物、背景、構図、画風を入力します。日本語入力とTag補完に対応しています。")
         self.scene.setAccessibleName("全体プロンプト")
         common.addWidget(self.scene)
-        common.addWidget(muted(QLabel("人物・背景・構図・画風など、対象全体に必ず反映したい内容")))
+        self.common_prompt_hint = muted(QLabel("人物・背景・構図・画風など、対象全体に必ず反映したい内容"))
+        common.addWidget(self.common_prompt_hint)
         common.addWidget(section(QLabel("除外プロンプト（描かないもの）")))
         self.negative = TagPromptEdit()
         self.negative.setMinimumHeight(68)
@@ -516,7 +560,7 @@ class MangaDocker(DockWidget):
         self.generate = QPushButton("▶  AIプレビュー生成")
         self.generate.setProperty("primary", True)
         self.generate.setEnabled(False)
-        self.generate.setToolTip("ローカルComfyUIでAnimaプレビューを生成します")
+        self.generate.setToolTip("設定したComfyUIでプレビューを生成します")
         self.generate.clicked.connect(self.generate_preview)
         layout.addWidget(self.generate)
 
@@ -664,6 +708,34 @@ class MangaDocker(DockWidget):
         self.model.blockSignals(False)
         if self._state is not None:
             self.edit_generation()
+
+    def choose_bfs_reference(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "キャラの参照画像を選択", self.bfs_reference_path.text(),
+            "画像 (*.png *.jpg *.jpeg *.webp *.bmp)")
+        if path:
+            self.bfs_reference_path.setText(path)
+
+    def update_bfs_ui(self):
+        bfs = self.generation_mode.currentData() in ("head", "body")
+        if hasattr(self, "common_prompt_label"):
+            self.common_prompt_label.setText("追加指示（任意・日本語可）" if bfs else "全体プロンプト（必須・日本語入力可）")
+            self.common_prompt_hint.setText("参照画像との合わせ方などを追加できます" if bfs else
+                                            "人物・背景・構図・画風など、対象全体に必ず反映したい内容")
+        for widget in (self.bfs_reference_row, self.bfs_reference_label, self.bfs_help_section):
+            widget.setVisible(bfs)
+        self.model_row.setVisible(not bfs)
+        self.model_label.setVisible(not bfs)
+        if hasattr(self, "guidance"):
+            self.guidance.setEnabled(not bfs and self._state is not None)
+            self.guidance.setToolTip("BFSではCFG 1.0を使用します" if bfs else "")
+
+    def edit_bfs_settings(self, *args):
+        self.update_bfs_ui()
+        if not self._loading and self._state is not None:
+            self._state["bfs_mode"] = self.generation_mode.currentData()
+            self._state["bfs_reference"] = self.bfs_reference_path.text()
+            self.persist()
 
     @staticmethod
     def read_ai_config():
@@ -870,6 +942,7 @@ class MangaDocker(DockWidget):
         self.region_negative.clear()
         self.scene.clear()
         self.negative.clear()
+        self.bfs_reference_path.clear()
         self.bounds.clear()
         try:
             if document:
@@ -893,15 +966,21 @@ class MangaDocker(DockWidget):
                 self.seed.setValue(self._state["seed"])
                 self.steps.setValue(self._state["steps"])
                 self.guidance.setValue(self._state["guidance"])
+                index = self.generation_mode.findData(self._state.get("bfs_mode", "standard"))
+                self.generation_mode.setCurrentIndex(max(0, index))
+                self.bfs_reference_path.setText(self._state.get("bfs_reference", ""))
                 self.status.setText(document.name())
             else:
+                self.generation_mode.setCurrentIndex(0)
                 self.status.setText("原稿を開いてください")
         except Exception as error:
             self.status.setText("配置データを読み込めません。元データは保持します：" + str(error))
         enabled = self._state is not None
         for widget in self.buttons + [self.scene, self.negative, self.regions, self.target_mode,
-                                      self.model, self.seed, self.steps, self.guidance]:
+                                      self.model, self.seed, self.steps, self.guidance,
+                                      self.generation_mode, self.bfs_reference_button]:
             widget.setEnabled(enabled)
+        self.update_bfs_ui()
         self.generate.setEnabled(enabled and not self._busy)
         self._loading = False
         self.apply_completion_setting()
@@ -1202,6 +1281,23 @@ class MangaDocker(DockWidget):
         return (", ".join(part for part in [prompt] + background if part),
                 ", ".join(part for part in [negative] + exclusions if part), regions)
 
+    @staticmethod
+    def bfs_png(image, width, height):
+        if image.isNull():
+            raise ValueError("BFSへ送る画像を読み込めませんでした")
+        canvas = QImage(width, height, QImage.Format_RGB32)
+        canvas.fill(Qt.white)
+        scaled = image.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        painter = QPainter(canvas)
+        painter.drawImage((width - scaled.width()) // 2, (height - scaled.height()) // 2, scaled)
+        painter.end()
+        buffer = QBuffer()
+        if not buffer.open(QIODevice.WriteOnly) or not canvas.save(buffer, "PNG"):
+            raise ValueError("BFS用PNGを作成できませんでした")
+        result = bytes(buffer.data())
+        buffer.close()
+        return result
+
     def generate_preview(self):
         if self._busy or not self._document or self._state is None:
             return
@@ -1209,7 +1305,11 @@ class MangaDocker(DockWidget):
             self.stop_canvas_modes()
             bounds = self.generation_bounds()
             prompt, negative, regions = self.generation_prompts(bounds)
-            if not prompt:
+            bfs_mode = self.generation_mode.currentData()
+            if bfs_mode in ("head", "body"):
+                prompt = self.scene.toPlainText().strip()
+                negative = self.negative.toPlainText().strip()
+            if not prompt and bfs_mode not in ("head", "body"):
                 raise ValueError("全体プロンプトを入力してください")
             seed = self.seed.value()
             if seed < 0:
@@ -1219,6 +1319,20 @@ class MangaDocker(DockWidget):
             steps = self.steps.value()
             guidance = self.guidance.value()
             model_id = self.model.currentData() or self.model.currentText()
+            base_png = reference_png = None
+            if bfs_mode in ("head", "body"):
+                reference = QImage(self.bfs_reference_path.text())
+                if reference.isNull():
+                    raise ValueError("BFSの参照画像を選択してください（PNG・JPGなど）")
+                x, y, target_width, target_height = [int(round(value)) for value in bounds]
+                base = document.projection(x, y, target_width, target_height)
+                width, height = comfy_backend.generation_size(bounds, maximum=self.ai_config["maximum"])
+                base_png = self.bfs_png(base, width, height)
+                scale = min(1.0, 768 / max(reference.width(), reference.height()))
+                reference_png = self.bfs_png(reference, max(32, int(reference.width() * scale)),
+                                             max(32, int(reference.height() * scale)))
+                self.source_preview.setPixmap(QPixmap.fromImage(base).scaled(
+                    150, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             parent_id = None
             if self.target_mode.currentData() == "current_panel":
                 window = Krita.instance().activeWindow()
@@ -1231,11 +1345,18 @@ class MangaDocker(DockWidget):
 
             def work():
                 try:
-                    image, info = comfy_backend.generate(
-                        prompt, negative, seed, steps, guidance, bounds, regions,
-                        lambda message: self.generation_signals.progress.emit(message, token),
-                        server=self.ai_config["server"], timeout=self.ai_config["timeout"],
-                        model_id=model_id, maximum=self.ai_config["maximum"])
+                    progress = lambda message: self.generation_signals.progress.emit(message, token)
+                    if bfs_mode in ("head", "body"):
+                        image, info = bfs_backend.generate(
+                            bfs_mode, base_png, reference_png, prompt, negative, seed, steps,
+                            server=self.ai_config["server"], timeout=self.ai_config["timeout"],
+                            progress=progress)
+                        info["size"] = [width, height]
+                    else:
+                        image, info = comfy_backend.generate(
+                            prompt, negative, seed, steps, guidance, bounds, regions,
+                            progress, server=self.ai_config["server"], timeout=self.ai_config["timeout"],
+                            model_id=model_id, maximum=self.ai_config["maximum"])
                     info["parent_node"] = parent_id
                     self.generation_signals.finished.emit(image, info,
                                                           [int(round(v)) for v in bounds], token)
@@ -1318,10 +1439,19 @@ class MangaDocker(DockWidget):
         parent = (self.find_node(self._document, info.get("parent_node"))
                   if info.get("parent_node") else self._document.rootNode())
         parent = parent or self._document.rootNode()
-        for node in list(parent.childNodes()):
-            if node.name() == "AI Preview":
-                node.remove()
-        layer = self._document.createNode("AI Preview", "paintlayer")
+        bfs = info.get("mode", "").startswith("bfs_")
+        if bfs:
+            for node in parent.childNodes():
+                if node.name().startswith("BFS Preview"):
+                    node.setVisible(False)
+            layer_name = "BFS Preview %s · Seed %s" % (
+                "頭部" if info["mode"] == "bfs_head" else "全身", info["seed"])
+        else:
+            for node in list(parent.childNodes()):
+                if node.name() == "AI Preview":
+                    node.remove()
+            layer_name = "AI Preview"
+        layer = self._document.createNode(layer_name, "paintlayer")
         parent.addChildNode(layer, None)
         ptr = placed.constBits()
         ptr.setsize(placed.byteCount())
@@ -1331,4 +1461,4 @@ class MangaDocker(DockWidget):
         self._document.refreshProjection()
         self.ai_preview.setPixmap(QPixmap.fromImage(image).scaled(150, 110, Qt.KeepAspectRatio,
                                                                   Qt.SmoothTransformation))
-        self.status.setText("AI Previewを追加 · Seed %s · %s" % (info["seed"], info["size"]))
+        self.status.setText("%sを追加 · Seed %s · %s" % (layer_name, info["seed"], info["size"]))
