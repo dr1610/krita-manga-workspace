@@ -11,3 +11,6 @@ __pycache__/
 *.webp
 .idea/
 .vscode/
+
+# Machine-local layerization runtime configuration
+manga_workspace/layerize-local.json

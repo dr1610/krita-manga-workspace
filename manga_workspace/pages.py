@@ -379,6 +379,7 @@ class PageDocker(DockWidget):
         self.session_pages = False
         self.session_documents = {}
         self.loading = False
+        self.busy = False
         self.restored = False
         self.guide_overlay = None
         body = QWidget()
@@ -388,9 +389,20 @@ class PageDocker(DockWidget):
         self.title = QLabel("1ページから管理できます")
         self.title.setWordWrap(True)
         layout.addWidget(self.title)
+        self.current_page_label = QLabel("編集中：原稿なし")
+        self.current_page_label.setObjectName("manga_current_page")
+        self.current_page_label.setWordWrap(True)
+        layout.addWidget(self.current_page_label)
         row = QHBoxLayout()
-        for title, fn in [("＋追加", self.add_page), ("複製", self.duplicate), ("削除", self.delete_page)]:
+        self.page_buttons = {}
+        for title, fn, key, tip in [
+                ("＋追加", self.add_page, "add", "末尾に新規ページを追加。原稿設定がある場合は基本枠を1つ作成"),
+                ("複製", self.duplicate, "duplicate", "選択ページの絵とコマ割りを複製し、その直後へ追加"),
+                ("外す", self.delete_page, "remove", "作品のページ一覧から外す。原稿ファイルは残ります")]:
             button = QPushButton(title)
+            button.setToolTip(tip)
+            button.setAccessibleName(title + "：" + tip)
+            self.page_buttons[key] = button
             button.setMinimumWidth(0)
             button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             button.clicked.connect(lambda checked=False, f=fn: self.run(f))
@@ -409,10 +421,31 @@ class PageDocker(DockWidget):
         more.setMenu(menu)
         row.addWidget(more)
         layout.addLayout(row)
+        # Keep setup ahead of the expanding page list, including in narrow docks.
+        settings_button = QPushButton("漫画原稿設定…")
+        settings_button.setObjectName("manga_page_settings")
+        settings_button.setMinimumWidth(0)
+        settings_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        settings_button.setToolTip("用紙・余白・コマ間隔・最初の基本枠を設定")
+        settings_button.clicked.connect(lambda: self.run(self.configure_page))
+        layout.addWidget(settings_button)
         ai_button = QPushButton("AI作画パネルを開く  ▶")
         ai_button.setToolTip("右側にAI作画の生成・Prompt設定を表示します")
         ai_button.clicked.connect(self.show_ai)
         layout.addWidget(ai_button)
+        from .layerize import LayerizeController
+        layerize_button = QPushButton("レイヤー化")
+        layerize_button.setObjectName("manga_layerize_page")
+        layerize_button.setToolTip("現在のページを解析し、確認後にレイヤー原稿を開く。元ページは保持")
+        self.layerize = LayerizeController(self, layerize_button)
+        layerize_button.clicked.connect(self.layerize.start)
+        layerize_button.setContextMenuPolicy(Qt.CustomContextMenu)
+        def layerize_menu(position):
+            menu = QMenu(layerize_button)
+            menu.addAction("レイヤー化の専用環境を選択…", self.layerize.choose_runtime)
+            menu.exec_(layerize_button.mapToGlobal(position))
+        layerize_button.customContextMenuRequested.connect(layerize_menu)
+        layout.addWidget(layerize_button)
         self.list = PageList()
         self.list.setViewMode(QListWidget.IconMode)
         self.list.setIconSize(QSize(80, 112))
@@ -424,22 +457,19 @@ class PageDocker(DockWidget):
         self.list.setAccessibleName("ページ一覧。クリックで開く、ドラッグで並べ替え")
         self.list.itemClicked.connect(self.activate)
         self.list.itemActivated.connect(self.activate)
+        self.list.currentRowChanged.connect(lambda _: self.update_page_controls())
         self.list.reordered.connect(self.reorder)
         layout.addWidget(self.list, 1)
-        self.add_buttons(layout, [("‹ 前ページ", lambda: self.step(-1)), ("次ページ ›", lambda: self.step(1))])
-        settings_row=QHBoxLayout()
-        settings_button=QPushButton("漫画原稿設定…")
-        settings_button.clicked.connect(lambda: self.run(self.configure_page))
-        settings_row.addWidget(settings_button)
+        self.navigation_buttons = self.add_buttons(layout, [("‹ 前ページ", lambda: self.step(-1)), ("次ページ ›", lambda: self.step(1))])
         self.show_guides = QCheckBox("ガイド表示")
         self.show_guides.setChecked(False)
         self.show_guides.toggled.connect(self.update_guides)
-        settings_row.addWidget(self.show_guides)
-        layout.addLayout(settings_row)
+        layout.addWidget(self.show_guides)
         self.info = QLabel("クリックで編集・ドラッグで並べ替え")
         self.info.setWordWrap(True)
         layout.addWidget(self.info)
         scroll_content(self, body)
+        self.update_page_controls()
 
     @staticmethod
     def path_key(path):
@@ -478,6 +508,7 @@ class PageDocker(DockWidget):
 
     def add_buttons(self, layout, entries):
         row = QHBoxLayout()
+        buttons = []
         for title, fn in entries:
             button = QPushButton(title)
             button.setMinimumWidth(0)
@@ -485,13 +516,48 @@ class PageDocker(DockWidget):
             button.setToolTip(title)
             button.clicked.connect(lambda checked=False, f=fn: self.run(f))
             row.addWidget(button)
+            buttons.append(button)
         layout.addLayout(row)
+        return buttons
+
+    def update_page_controls(self):
+        if self.loading:
+            return
+        row = self.list.currentRow()
+        available = not self.busy
+        self.page_buttons["add"].setEnabled(available and self.document is not None)
+        self.page_buttons["duplicate"].setEnabled(available and self.document is not None)
+        self.page_buttons["remove"].setEnabled(available and self.selected() is not None)
+        for button, delta in zip(self.navigation_buttons, (-1, 1)):
+            button.setEnabled(available and row >= 0 and 0 <= row + delta < self.list.count())
+
+    def update_current_page_label(self, pages):
+        if not self.document:
+            text = "編集中：原稿なし"
+        elif not self.project_path and not self.session_pages:
+            text = "編集中：1 / 1ページ"
+        else:
+            key = self.path_key(self.document.fileName())
+            number = next((i + 1 for i, page in enumerate(pages)
+                           if (self.session_pages and self.session_documents.get(page["id"]) == self.document)
+                           or (key and self.path_key(page["file"]) == key)), None)
+            text = ("編集中：%d / %dページ" % (number, len(pages)) if number else
+                    "編集中：この作品の一覧外")
+        self.current_page_label.setText(text)
+        self.current_page_label.setToolTip(self.document.fileName() if self.document else "")
 
     def run(self, fn):
+        if self.busy:
+            return
+        self.busy = True
+        self.update_page_controls()
         try:
             fn()
         except Exception as error:
             QMessageBox.warning(self, "ページ管理", str(error))
+        finally:
+            self.busy = False
+            self.update_page_controls()
 
     def show_ai(self):
         window = Krita.instance().activeWindow()
@@ -621,6 +687,7 @@ class PageDocker(DockWidget):
             name = (Path(self.project_path).name.removesuffix(".manga.json") if self.project_path else
                     "未保存のコミック" if self.session_pages else "単ページ")
             self.title.setText(name + " · %dページ" % len(pages))
+            self.update_current_page_label(pages)
             if self.project_path and current and not any(self.path_key(p["file"])==current for p in pages):
                 self.info.setText("現在の原稿はこの作品の一覧外です")
             else:
@@ -628,6 +695,7 @@ class PageDocker(DockWidget):
             self.remember()
         finally:
             self.loading = False
+            self.update_page_controls()
 
     def persist(self):
         if self.project_path:
@@ -815,20 +883,12 @@ class PageDocker(DockWidget):
                 layer = doc.createNode("描画", "paintlayer")
                 doc.rootNode().addChildNode(layer, None)
                 doc.setActiveNode(layer)
-        prepared_view=None
         if settings and not duplicate:
-            window=app.activeWindow()
-            panel=next((d for d in window.dockers() if d.objectName()=="manga_panels"),None) if window else None
-            if not panel:
-                raise ValueError("コマ割りパネルを読み込めないため、最初の大ゴマを作成できません")
-            prepared_view=window.addView(doc)
-            prepared_view.setVisible()
-            self.document=doc
-            panel.canvasChanged(prepared_view.canvas())
-            panel.line.setValue(settings["frame_line_mm"])
-            panel.gap.setValue(settings["panel_gap_mm"])
-            if not panel.active_panels():
-                panel.basic_frame()
+            # Canvas.view() can still refer to the old page during addView.
+            # Build only in this document, before showing it or rebinding dockers.
+            from .panels import initialize_page_frame
+            per_page = json.loads(bytes(doc.annotation(PAGE_SETTINGS_KEY)))
+            initialize_page_frame(doc, per_page)
         # A new page belongs at the end of the work regardless of which page
         # is currently open. A duplicate stays beside its source page.
         index = self.list.currentRow() + 1 if duplicate else len(self.data["pages"])
@@ -848,8 +908,7 @@ class PageDocker(DockWidget):
             self.data["pages"].remove(entry)
             app.activeWindow().addView(doc)
             raise
-        if prepared_view is None:
-            app.activeWindow().addView(doc)
+        app.activeWindow().addView(doc)
         self.document = doc
         self.refresh()
 

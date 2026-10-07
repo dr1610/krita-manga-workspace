@@ -1,5 +1,5 @@
 from krita import Extension, Krita
-from PyQt5.QtCore import Qt, QTimer, QByteArray, QEvent, QPoint, QSize
+from PyQt5.QtCore import Qt, QTimer, QByteArray, QEvent, QPoint, QSize, QObject
 from PyQt5.QtWidgets import (QMenu, QToolBar, QApplication, QAbstractButton, QStyle,
                              QDockWidget, QScrollArea, QWidget, QVBoxLayout)
 from PyQt5.QtWidgets import QAction
@@ -7,6 +7,15 @@ from .compact import CompactScroll, scroll_content
 from .onomatopoeia import OnomatopoeiaMaterialWidget, OnomatopoeiaSettingsDialog, make_icon
 from .updater import UpdateDialog, UpdateManager
 from .material_tools import MaterialTools
+
+
+class LayerRTMenuFilter(QObject):
+    def __init__(self, extension):
+        super().__init__(extension)
+        self.extension = extension
+
+    def eventFilter(self, obj, event):
+        return self.extension.filter_rt_menu(obj, event)
 
 
 class MaterialDock(QDockWidget):
@@ -22,9 +31,65 @@ class WorkspaceExtension(Extension):
         self._tool_press = {}
         self._tool_dragging = None
         self._update_managers = {}
+        self._rt_context_main = None
+        self._application_filter_installed = False
 
     def setup(self):
-        pass
+        notifier = Krita.instance().notifier()
+        notifier.setActive(True)
+        notifier.viewCreated.connect(self.queue_startup_tool)
+
+    def queue_startup_tool(self, *_):
+        window = Krita.instance().activeWindow()
+        if window is None or window.activeView() is None:
+            return
+        main = window.qwindow()
+        if main.property('manga_startup_tool_selected') or main.property('manga_startup_tool_pending'):
+            return
+        main.setProperty('manga_startup_tool_pending', True)
+        QTimer.singleShot(250, lambda: self.select_startup_tool(main))
+
+    def select_startup_tool(self, main, attempt=0, stable=0):
+        from .interaction import tool_name
+        window = Krita.instance().activeWindow()
+        if window is None or window.qwindow() != main:
+            main.setProperty('manga_startup_tool_pending', False)
+            return
+        if main.property('manga_startup_tool_selected'):
+            main.setProperty('manga_startup_tool_pending', False)
+            return
+        if window.activeView() is not None:
+            # Tool actions live in Krita's action registry, not necessarily as
+            # QAction children of the main window.
+            if tool_name(main) == 'InteractionTool':
+                stable += 1
+            else:
+                stable = 0
+                action = Krita.instance().action('InteractionTool')
+                if action is not None and action.isEnabled():
+                    action.trigger()
+            # Confirm the actual toolbox state after startup restoration settles.
+            if stable >= 3:
+                main.setProperty('manga_startup_tool_selected', True)
+                main.setProperty('manga_startup_tool_pending', False)
+                return
+        if attempt < 19:
+            QTimer.singleShot(250, lambda: self.select_startup_tool(main, attempt + 1, stable))
+        else:
+            main.setProperty('manga_startup_tool_pending', False)
+
+    def open_model_browser(self, window):
+        from .model_browser import ModelBrowser
+        dialog = getattr(self, '_model_browser', None)
+        try:
+            if dialog is not None and dialog.isVisible():
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+        except RuntimeError:
+            pass
+        self._model_browser = ModelBrowser(window)
+        self._model_browser.show()
 
     def createActions(self, window):
         main = window.qwindow()
@@ -47,6 +112,11 @@ class WorkspaceExtension(Extension):
         menu = QMenu("ページ管理", main)
         menu.setObjectName("manga_pages_menu")
         main.menuBar().addMenu(menu)
+        model_menu = QMenu("生成モデル", main)
+        model_menu.setObjectName("manga_generation_models_menu")
+        model_menu.addAction("モデルを選ぶ・参考画像を見る…",
+                             lambda: self.open_model_browser(window))
+        main.menuBar().addMenu(model_menu)
         for identity, title in [("manga_pages", "ページ管理を表示"),
                                 ("manga_panels", "コマ割りを表示"),
                                 ("manga_workspace", "AI作画を表示")]:
@@ -116,7 +186,12 @@ class WorkspaceExtension(Extension):
         main.addToolBar(Qt.TopToolBarArea, bar)
         bar.show()
         main.installEventFilter(self)
+        if not self._application_filter_installed:
+            self._rt_menu_filter = LayerRTMenuFilter(self)
+            QApplication.instance().installEventFilter(self._rt_menu_filter)
+            self._application_filter_installed = True
         main.setProperty("manga_workspace_menu", True)
+        self.queue_startup_tool()
         # Adapt the installed AI docker only at runtime; disabling this plugin
         # and restarting leaves its source and standard layout behavior intact.
         for dock in window.dockers():
@@ -355,10 +430,31 @@ class WorkspaceExtension(Extension):
         QTimer.singleShot(0, lambda p=panels, a=area: p.set_dock_orientation(a))
         self.save_layout(main)
 
+    def filter_rt_menu(self, obj, event):
+        if event.type() == QEvent.ContextMenu:
+            ancestor = obj
+            while ancestor is not None:
+                if isinstance(ancestor, QDockWidget) and ancestor.objectName() == 'KisLayerBox':
+                    self._rt_context_main = ancestor.window()
+                    QTimer.singleShot(500, self._clear_rt_context)
+                    break
+                ancestor = ancestor.parent()
+        if event.type() == QEvent.Show and isinstance(obj, QMenu) and self._rt_context_main is not None:
+            main, self._rt_context_main = self._rt_context_main, None
+            if not any(action.objectName() == 'manga_layer_rt' for action in obj.actions()):
+                action = QAction('RT生成', obj)
+                action.setObjectName('manga_layer_rt')
+                action.triggered.connect(lambda checked=False, m=main: QTimer.singleShot(0, lambda: self._open_layer_rt(m)))
+                first = obj.actions()[0] if obj.actions() else None
+                obj.insertAction(first, action)
+                obj.insertSeparator(first)
+        return False
+
     def eventFilter(self, obj, event):
         if isinstance(obj, QAbstractButton) and obj.metaObject().className() == "KoToolBoxButton":
             typ = event.type()
             if typ == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                obj.window().setProperty('manga_startup_tool_selected', True)
                 self._tool_press[obj] = event.pos()
                 return False
             if typ == QEvent.MouseMove and obj in self._tool_press and event.buttons() & Qt.LeftButton:
@@ -380,6 +476,19 @@ class WorkspaceExtension(Extension):
         if event.type() == QEvent.Close and obj.property("manga_workspace_menu"):
             self.save_layout(obj)
         return False
+
+    def _clear_rt_context(self):
+        self._rt_context_main = None
+
+    def _open_layer_rt(self, main):
+        window = next((w for w in Krita.instance().windows() if w.qwindow() == main), None)
+        if window is None:
+            return
+        panels = next((d for d in window.dockers() if d.objectName() == 'manga_panels'), None)
+        if panels is not None:
+            if panels.document is not None:
+                panels.sync_layer(panels.document.activeNode())
+            panels.run(panels.open_live_panel)
 
     def arrange(self, window, review=False, ai_mode=False):
         main = window.qwindow()

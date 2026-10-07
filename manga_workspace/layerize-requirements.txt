@@ -1,0 +1,6 @@
+tensorflow==2.16.2
+tf-keras==2.16.0
+opencv-python-headless==4.11.0.86
+numpy==1.26.4
+Pillow>=9.4
+onnxruntime>=1.18

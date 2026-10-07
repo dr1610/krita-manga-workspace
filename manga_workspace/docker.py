@@ -240,7 +240,26 @@ class MangaDocker(DockWidget):
         self.tabs.addTab(self.generate_tab, "生成")
         self.tabs.addTab(self.history_tab, "履歴")
         self.tabs.addTab(self.settings_tab, "設定")
-        root.addWidget(self.tabs)
+        self.mode_tabs = QTabWidget()
+        self.mode_tabs.setObjectName("manga_generation_modes")
+        self.mode_tabs.addTab(self.tabs, "AI作画")
+        self.rt_tab = QWidget()
+        self.mode_tabs.addTab(self.rt_tab, "RT生成")
+        rt_layout = QVBoxLayout(self.rt_tab)
+        rt_layout.setContentsMargins(6, 6, 6, 6)
+        rt_hint = QLabel("コマを選択して、拡大画面でリアルタイム作画")
+        rt_hint.setWordWrap(True)
+        rt_layout.addWidget(rt_hint)
+        self.rt_open_button = QPushButton("RT生成を開く")
+        self.rt_open_button.setObjectName("manga_open_rt")
+        self.rt_open_button.setToolTip("選択コマのLive作画を開き、生成結果をコマへ反映します")
+        self.rt_open_button.clicked.connect(self.open_realtime)
+        rt_layout.addWidget(self.rt_open_button)
+        self.rt_status = QLabel("")
+        self.rt_status.setWordWrap(True)
+        rt_layout.addWidget(self.rt_status)
+        rt_layout.addStretch()
+        root.addWidget(self.mode_tabs)
 
         self.build_generate_tab()
         self.build_history_tab()
@@ -889,9 +908,29 @@ class MangaDocker(DockWidget):
         self.stop_canvas_modes(keep_status=True)
 
     def open_settings(self):
+        self.mode_tabs.setCurrentWidget(self.tabs)
         self.tabs.setCurrentWidget(self.settings_tab)
         self.show()
         self.raise_()
+
+    def open_realtime(self):
+        try:
+            app = Krita.instance()
+            window = app.activeWindow()
+            panel_dock = next((dock for dock in window.dockers()
+                               if dock.objectName() == "manga_panels"), None) if window else None
+            if not self._document or app.activeDocument() != self._document:
+                raise ValueError("対象の原稿を開いてください")
+            if not panel_dock or panel_dock.document != self._document:
+                raise ValueError("ページの表示が完了してから開いてください")
+            if panel_dock.current() is None:
+                raise ValueError("コマ割りパネルで作画するコマを選択してください")
+            self.stop_canvas_modes()
+            panel_dock.stop_tool()
+            panel_dock.open_live_panel()
+            self.rt_status.setText("")
+        except Exception as error:
+            self.rt_status.setText(str(error))
 
     def stop_placing(self):
         self.placing = False

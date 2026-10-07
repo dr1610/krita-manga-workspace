@@ -35,6 +35,92 @@ def image_bytes(image):
     return bytes(ptr)
 
 
+def build_shape_on_document(doc, poly, group, width):
+    x = max(0, math.floor(min(p[0] for p in poly)-width-2))
+    y = max(0, math.floor(min(p[1] for p in poly)-width-2))
+    w = min(doc.width(), math.ceil(max(p[0] for p in poly)+width+2))-x
+    h = min(doc.height(), math.ceil(max(p[1] for p in poly)+width+2))-y
+    if w*h > 100_000_000:
+        raise ValueError("コマ領域が大きすぎます。1億画素以下にしてください")
+    points = QPolygonF([QPointF(p[0]-x, p[1]-y) for p in poly])
+    mask_image = QImage(w,h,QImage.Format_Grayscale8)
+    mask_image.fill(0)
+    painter = QPainter(mask_image)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(Qt.white)
+    painter.drawPolygon(points)
+    painter.end()
+    raw = image_bytes(mask_image)
+    stride = mask_image.bytesPerLine()
+    packed = b"".join(raw[i*stride:i*stride+w] for i in range(h))
+    selection = Selection()
+    selection.setPixelData(QByteArray(packed), x,y,w,h)
+    mask = doc.createTransparencyMask("コマ外を隠す")
+    group.addChildNode(mask, None)
+    mask.setSelection(selection)
+    frame = doc.createNode("枠線", "paintlayer")
+    group.addChildNode(frame, None)
+    image = QImage(w,h,QImage.Format_ARGB32)
+    image.fill(Qt.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.Antialiasing)
+    # Mask clips the outside half, leaving the requested width inside.
+    painter.setPen(QPen(Qt.black, 2*width, Qt.SolidLine, Qt.SquareCap, Qt.MiterJoin))
+    painter.drawPolygon(points)
+    painter.end()
+    frame.setPixelData(QByteArray(image_bytes(image)),x,y,w,h)
+    frame.setLocked(True)
+    return mask, frame
+
+
+def create_frame_on_document(doc, poly, line_mm, source=None):
+    if doc.colorModel() != "RGBA" or doc.colorDepth() != "U8":
+        raise ValueError("現在のコマ枠描画はRGB/Alpha・8bit原稿に対応しています")
+    identity = str(uuid4())
+    initial_name = "コマ " + identity[:8]
+    group = doc.createGroupLayer(initial_name)
+    doc.rootNode().addChildNode(group, None)
+    try:
+        if source:
+            old = node_by_id(doc, source["node"])
+            if not old:
+                raise ValueError("元コマのレイヤーが見つかりません")
+            for child in old.childNodes():
+                if child.uniqueId().toString() not in (source["mask"], source["frame"]):
+                    group.addChildNode(child.duplicate(), None)
+        if not group.childNodes():
+            group.addChildNode(doc.createNode("描画", "paintlayer"), None)
+        width = line_mm * doc.resolution() / 25.4
+        mask, frame = build_shape_on_document(doc, poly, group, width)
+        return {"id":identity,"polygon":poly,"node":group.uniqueId().toString(),
+                "mask":mask.uniqueId().toString(),"frame":frame.uniqueId().toString(),
+                "active":True,"width":width,"managed_name":initial_name}
+    except Exception:
+        group.remove()
+        raise
+
+
+def initialize_page_frame(document, settings):
+    """Initialize an unopened page without consulting any view or shared docker."""
+    if bytes(document.annotation(KEY)):
+        raise ValueError("既存のコマ情報があるページは初期化できません")
+    rect = settings["basic_frame_px"]
+    polygon = geometry.rectangle(rect[:2], rect[2:], document.width(), document.height())
+    panel = create_frame_on_document(document, polygon, settings["frame_line_mm"])
+    group = node_by_id(document, panel["node"])
+    try:
+        group.setName("コマ 01")
+        group.setColorLabel(PANEL_COLOR_LABEL)
+        panel.update(managed_name="コマ 01", color_label_initialized=True)
+        data = {"version": 1, "panels": [panel], "history": []}
+        document.setAnnotation(KEY, "漫画コマ枠", QByteArray(json.dumps(data).encode("utf-8")))
+        document.setModified(True)
+        document.refreshProjection()
+    except Exception:
+        group.remove()
+        raise
+
+
 class FrameOverlay(QWidget):
     def __init__(self, canvas, owner, view, passive=False):
         super().__init__(canvas)
@@ -165,8 +251,14 @@ class PanelDocker(DockWidget):
         layout.setSpacing(3)
         top = QHBoxLayout()
         self.controls_layout = top
+        self.target_label = QLabel("対象：原稿なし")
+        self.target_label.setObjectName("manga_panel_target")
+        self.target_label.setWordWrap(True)
+        self.target_label.setMinimumWidth(0)
+        layout.addWidget(self.target_label)
         self.status = QLabel("コマを選択")
-        self.status.setMinimumWidth(120)
+        self.status.setWordWrap(True)
+        self.status.setMinimumWidth(0)
         top.addWidget(self.status)
         self.mode = QComboBox()
         self.mode.addItems(["枠を描く", "枠を分割", "コマを選択して描画", "境界を移動"])
@@ -212,11 +304,19 @@ class PanelDocker(DockWidget):
         self.actions_layout = actions
         actions.setSpacing(3)
         draw = QPushButton("このコマに描く")
+        self.draw_button = draw
         draw.clicked.connect(lambda: self.run(self.draw_selected))
         actions.addWidget(draw)
+        live = QPushButton("このコマでLive作画…")
+        self.live_button = live
+        live.setToolTip("選択コマを拡大し、Krita AI DiffusionのLive生成を使う")
+        live.clicked.connect(lambda: self.run(self.open_live_panel))
+        actions.addWidget(live)
         native = QHBoxLayout()
+        self.native_buttons = []
         for title, action in [("画像を移動", MOVE), ("画像を変形", TRANSFORM)]:
             button = QPushButton(title)
+            self.native_buttons.append(button)
             button.clicked.connect(lambda checked=False, a=action: self.run(lambda: self.native_tool(a)))
             native.addWidget(button)
         actions.addLayout(native)
@@ -250,6 +350,8 @@ class PanelDocker(DockWidget):
         self.thumbnail_timer = QTimer(self)
         self.thumbnail_timer.setSingleShot(True)
         self.thumbnail_timer.timeout.connect(self.update_thumbnails)
+        self.mode.currentIndexChanged.connect(self.mode_changed)
+        self.update_action_state()
 
     def set_dock_orientation(self, area):
         vertical = area in (Qt.LeftDockWidgetArea, Qt.RightDockWidgetArea)
@@ -303,13 +405,21 @@ class PanelDocker(DockWidget):
         try:
             if not self.document or self.data is None:
                 raise ValueError("編集可能な原稿を開いてください")
+            if Krita.instance().activeDocument() != self.document:
+                raise ValueError("ページ切り替え中です。対象ページの表示後に操作してください")
             fn()
         except Exception as error:
             self.status.setText(str(error))
 
     def canvasChanged(self, canvas):
+        document = canvas.view().document() if canvas and canvas.view() else None
+        if document == self.document and self.data is not None:
+            # Reopening a docker or fitting the view is not a tool switch.
+            self.update_action_state()
+            self.update_highlight()
+            return
         self.stop_tool()
-        self.document = canvas.view().document() if canvas and canvas.view() else None
+        self.document = document
         self.data = None
         try:
             if self.document:
@@ -339,7 +449,14 @@ class PanelDocker(DockWidget):
                 and node_by_id(self.document, p["node"])]
 
     def refresh(self):
-        identity = self.selection_by_document.get(self.document_key()) if self.document else None
+        selected_id = None
+        if self.document:
+            key = self.document_key()
+            if key in self.selection_by_document:
+                selected_id = self.selection_by_document[key]
+            else:
+                active = self.panel_for_node(self.document.activeNode())
+                selected_id = active["id"] if active else None
         self.list.blockSignals(True)
         self.list.clear()
         thumb = self.document.thumbnail(640,640) if self.document and self.active_panels() else None
@@ -350,10 +467,8 @@ class PanelDocker(DockWidget):
             item.setToolTip("%s\nクリックでこのコマの描画レイヤーを選択" % group.name())
             self.set_thumbnail(item, panel, thumb)
             self.list.addItem(item)
-            if panel["id"] == identity:
+            if panel["id"] == selected_id:
                 self.list.setCurrentItem(item)
-        if self.list.count() and self.list.currentRow()<0:
-            self.list.setCurrentRow(0)
         self.list.blockSignals(False)
         self.select_panel(self.list.currentRow())
 
@@ -401,7 +516,8 @@ class PanelDocker(DockWidget):
         return next((p for p in self.active_panels() if item and p["id"] == item.data(Qt.UserRole)), None)
 
     def document_key(self):
-        return (self.document.fileName(), identity(self.document.rootNode())) if self.document else None
+        # Save As changes a path, but does not change the document being edited.
+        return identity(self.document.rootNode()) if self.document else None
 
     def select_panel(self, row, activate=False):
         panel = self.current()
@@ -411,8 +527,57 @@ class PanelDocker(DockWidget):
             if activate:
                 self.activate_drawing()
         else:
-            self.status.setText("コマはありません。基本枠を作成できます")
+            self.status.setText("コマを選択してください" if self.list.count() else
+                                "基本枠を作成して始められます" if self.document else "原稿を開いてください")
+        self.update_action_state()
         self.update_highlight()
+
+    def update_action_state(self):
+        panel = self.current()
+        node = self.document.activeNode() if self.document else None
+        ready = bool(self.document and self.data is not None
+                     and Krita.instance().activeDocument() == self.document)
+        self.draw_button.setEnabled(ready and panel is not None)
+        self.live_button.setEnabled(ready and panel is not None)
+        for button in self.native_buttons:
+            button.setEnabled(ready and node is not None and editable(node) and not self.is_frame(node))
+        if not self.document:
+            text = "対象：原稿なし"
+        elif not ready:
+            text = "対象：ページ切り替え中"
+        elif panel:
+            group = node_by_id(self.document, panel["node"])
+            text = "対象：" + group.name()
+            if node and self.panel_for_node(node) == panel and node != group:
+                text += " ／ " + node.name()
+        else:
+            text = "対象：ページ全体" + (" ／ " + node.name() if node else "")
+        self.target_label.setText(text)
+        self.target_label.setToolTip(text)
+        self.update_tool_state()
+
+    def mode_changed(self, *_):
+        if self.overlay:
+            self.overlay.start = self.overlay.end = None
+            self.overlay.update()
+        self.update_tool_state()
+
+    def update_tool_state(self):
+        labels = ("枠作成", "分割", "コマ選択", "境界移動")
+        hints = ("原稿上でドラッグして枠を作成", "コマを横切るようにドラッグして分割",
+                 "原稿上のコマをクリックして描画", "選択コマの辺からドラッグして移動")
+        index = self.mode.currentIndex()
+        running = self.overlay is not None
+        self.tool.setText(labels[index] + ("中・終了" if running else "を開始"))
+        self.tool.setToolTip(hints[index] + "。Esc・右クリックで終了")
+        self.mode.setToolTip(hints[index])
+        ready = bool(self.document and self.data is not None
+                     and Krita.instance().activeDocument() == self.document)
+        available = ready and (index == 0 or bool(self.active_panels()))
+        if index == 3:
+            available = ready and self.current() is not None
+        self.tool.setEnabled(running or available)
+        self.mode.setEnabled(ready)
 
     def save_annotation(self):
         self.document.setAnnotation(KEY, "漫画コマ枠", QByteArray(json.dumps(self.data).encode("utf-8")))
@@ -465,36 +630,42 @@ class PanelDocker(DockWidget):
                 widget.update()
 
     def create_frame(self, poly, source=None):
-        doc = self.document
-        if doc.colorModel() != "RGBA" or doc.colorDepth() != "U8":
-            raise ValueError("現在のコマ枠描画はRGB/Alpha・8bit原稿に対応しています")
-        identity = str(uuid4())
-        initial_name = "コマ " + identity[:8]
-        group = doc.createGroupLayer(initial_name)
-        doc.rootNode().addChildNode(group, None)
-        try:
-            if source:
-                old = node_by_id(doc, source["node"])
-                if not old:
-                    raise ValueError("元コマのレイヤーが見つかりません")
-                for child in old.childNodes():
-                    if child.uniqueId().toString() not in (source["mask"], source["frame"]):
-                        group.addChildNode(child.duplicate(), None)
-            if not group.childNodes():
-                group.addChildNode(doc.createNode("描画", "paintlayer"), None)
-            width = self.line.value() * doc.resolution() / 25.4
-            mask, frame = self.build_shape(poly, group, width)
-            return {"id":identity,"polygon":poly,"node":group.uniqueId().toString(),
-                    "mask":mask.uniqueId().toString(),"frame":frame.uniqueId().toString(),
-                    "active":True,"width":width,"managed_name":initial_name}
-        except Exception:
-            group.remove()
-            raise
+        return create_frame_on_document(self.document, poly, self.line.value(), source)
 
     def add(self, polygon):
-        self.data["panels"].append(self.create_frame(polygon))
+        created = self.create_frame(polygon)
+        self.data["panels"].append(created)
         self.persist()
-        self.list.setCurrentRow(self.list.count()-1)
+        self.select_created_panel(created["id"])
+
+    def select_created_panel(self, panel_id):
+        """Let Krita register new layer shapes before activating their nodes."""
+        document = self.document
+        document.waitForDone()
+        row = next((i for i, p in enumerate(self.active_panels()) if p["id"] == panel_id), None)
+        if row is None:
+            return
+        # currentRowChanged normally selects the drawing layer immediately.
+        # On Krita 5.2 the node can exist before its GUI shape is registered.
+        self.list.blockSignals(True)
+        try:
+            self.list.setCurrentRow(row)
+        finally:
+            self.list.blockSignals(False)
+        self.select_panel(row)
+        token = object()
+        self._created_selection_token = token
+
+        def activate_when_registered():
+            if (self._created_selection_token is not token or self.document != document
+                    or Krita.instance().activeDocument() != document):
+                return
+            panel = self.current()
+            if panel and panel["id"] == panel_id:
+                self.run(self.activate_drawing)
+
+        # Return to Qt so queued node-added notifications finish first.
+        QTimer.singleShot(0, activate_when_registered)
 
     def grid_split(self, columns, rows):
         """Split the current panel into an evenly spaced reversible grid."""
@@ -537,7 +708,7 @@ class PanelDocker(DockWidget):
         })
         self.data["geometry_history"] = []
         self.persist()
-        self.list.setCurrentRow(max(0, self.list.count() - len(created)))
+        self.select_created_panel(created[0]["id"])
         self.status.setText("現在のコマを%d列×%d段に分割しました" % (columns, rows))
 
     def from_selection(self):
@@ -634,6 +805,20 @@ class PanelDocker(DockWidget):
         self.activate_drawing()
         self.native_tool(BRUSH)
 
+    def open_live_panel(self):
+        panel = self.current()
+        if panel is None:
+            raise ValueError("Live作画するコマを先に選択してください")
+        if hasattr(self, "live_dialog") and self.live_dialog is not None and self.live_dialog.isVisible():
+            self.live_dialog.raise_()
+            self.live_dialog.activateWindow()
+            return
+        from .live_panel import LivePanelDialog
+        self.live_dialog = LivePanelDialog(self.document, panel,
+                                          Krita.instance().activeWindow().qwindow())
+        self.live_dialog.destroyed.connect(lambda: setattr(self, "live_dialog", None))
+        self.live_dialog.show()
+
     def is_frame(self, node):
         return any(identity(node) == p['frame'] for p in self.active_panels())
 
@@ -654,10 +839,11 @@ class PanelDocker(DockWidget):
             self.list.blockSignals(True)
             self.list.setCurrentRow(-1)
             self.list.blockSignals(False)
-            self.selection_by_document.pop(self.document_key(), None)
+            self.selection_by_document[self.document_key()] = None
             self.update_highlight()
             if node:
                 self.status.setText('ページ上のレイヤー：' + node.name())
+            self.update_action_state()
             return
         if node.type() in PICKABLE_TYPES and identity(node) != panel['frame'] and editable(node):
             self.drawing_by_panel[(self.document_key(), panel['id'])] = identity(node)
@@ -683,6 +869,7 @@ class PanelDocker(DockWidget):
         self.sync_layer(drawing)
 
     def native_tool(self, action):
+        self.selection_bridge.tool_retention.explicit_choice()
         node = self.document.activeNode()
         pending = self.selection_bridge.pending
         if pending and pending[0] == self.document_key():
@@ -727,7 +914,7 @@ class PanelDocker(DockWidget):
                 self.list.blockSignals(True)
                 self.list.setCurrentRow(-1)
                 self.list.blockSignals(False)
-                self.selection_by_document.pop(self.document_key(), None)
+                self.selection_by_document[self.document_key()] = None
                 self.update_highlight()
                 self.status.setText('ページ上の画像：' + node.name())
             else:
@@ -759,11 +946,13 @@ class PanelDocker(DockWidget):
             widget, view = self.canvas_widget()
             if not view or self.data is None:
                 raise ValueError("原稿を開いてください")
+            if view.document() != self.document:
+                raise ValueError("ページ切り替え中です。対象ページの表示後に操作してください")
             if not widget:
                 raise ValueError("Canvasを特定できません。単一の原稿タブで操作してください")
             self.overlay = FrameOverlay(widget,self,view)
             self.update_highlight()
-            self.tool.setText("終了")
+            self.update_tool_state()
         except Exception as error:
             self.status.setText(str(error))
             self.stop_tool()
@@ -775,8 +964,8 @@ class PanelDocker(DockWidget):
             self.overlay = None
         self.tool.blockSignals(True)
         self.tool.setChecked(False)
-        self.tool.setText("操作開始")
         self.tool.blockSignals(False)
+        self.update_tool_state()
         QTimer.singleShot(0, self.update_highlight)
 
     def boundary_polygon(self, a, b):
@@ -857,39 +1046,4 @@ class PanelDocker(DockWidget):
         self.persist()
 
     def build_shape(self, poly, group, width):
-        doc = self.document
-        x = max(0, math.floor(min(p[0] for p in poly)-width-2))
-        y = max(0, math.floor(min(p[1] for p in poly)-width-2))
-        w = min(doc.width(), math.ceil(max(p[0] for p in poly)+width+2))-x
-        h = min(doc.height(), math.ceil(max(p[1] for p in poly)+width+2))-y
-        if w*h > 100_000_000:
-            raise ValueError("コマ領域が大きすぎます。1億画素以下にしてください")
-        points = QPolygonF([QPointF(p[0]-x, p[1]-y) for p in poly])
-        mask_image = QImage(w,h,QImage.Format_Grayscale8)
-        mask_image.fill(0)
-        painter = QPainter(mask_image)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(Qt.white)
-        painter.drawPolygon(points)
-        painter.end()
-        raw = image_bytes(mask_image)
-        stride = mask_image.bytesPerLine()
-        packed = b"".join(raw[i*stride:i*stride+w] for i in range(h))
-        selection = Selection()
-        selection.setPixelData(QByteArray(packed), x,y,w,h)
-        mask = doc.createTransparencyMask("コマ外を隠す")
-        group.addChildNode(mask, None)
-        mask.setSelection(selection)
-        frame = doc.createNode("枠線", "paintlayer")
-        group.addChildNode(frame, None)
-        image = QImage(w,h,QImage.Format_ARGB32)
-        image.fill(Qt.transparent)
-        painter = QPainter(image)
-        painter.setRenderHint(QPainter.Antialiasing)
-        # Mask clips the outside half, leaving the requested width inside.
-        painter.setPen(QPen(Qt.black, 2*width, Qt.SolidLine, Qt.SquareCap, Qt.MiterJoin))
-        painter.drawPolygon(points)
-        painter.end()
-        frame.setPixelData(QByteArray(image_bytes(image)),x,y,w,h)
-        frame.setLocked(True)
-        return mask, frame
+        return build_shape_on_document(self.document, poly, group, width)

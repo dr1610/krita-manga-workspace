@@ -6,6 +6,7 @@ from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import QApplication, QAbstractButton
 from krita import Krita
 from . import geometry
+from .tool_retention import ToolRetention
 
 ARROW = 'InteractionTool'
 BRUSH = 'KritaShape/KisToolBrush'
@@ -82,6 +83,7 @@ class CanvasSelection(QObject):
         self.pending = None
         self.keep_arrow = False
         self.native_drag = False
+        self.tool_retention = ToolRetention()
         QApplication.instance().installEventFilter(self)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
@@ -94,6 +96,7 @@ class CanvasSelection(QObject):
             if not doc or doc != self.owner.document or window.qwindow() != self.owner.window():
                 self.press = self.last_node = self.last_tool = None
                 self.native_drag = False
+                self.tool_retention.reset()
                 return
             tool = tool_name(window.qwindow())
             node = doc.activeNode()
@@ -102,14 +105,18 @@ class CanvasSelection(QObject):
                 if key == self.owner.document_key() and identity(node) != wanted and time.monotonic() < deadline:
                     return
                 self.pending = None
-                if self.keep_arrow and identity(node) == wanted and tool == BRUSH:
-                    Krita.instance().action(ARROW).trigger()
-                    tool = ARROW
                 self.keep_arrow = False
-            if tool == BRUSH and self.last_tool == ARROW and self.owner.is_frame(node):
-                self.owner.activate_drawing()
-                node = doc.activeNode()
-            key = (self.owner.document_key(), identity(node))
+            restore = self.tool_retention.observe(identity(node), tool, time.monotonic())
+            if restore:
+                action = Krita.instance().action(restore)
+                if action is not None and action.isEnabled():
+                    action.trigger()
+                    tool = tool_name(window.qwindow())
+                # Never repeatedly fight Krita if the tool is unavailable for
+                # this layer type. Record the tool actually accepted by Krita.
+                self.tool_retention.tool = tool
+            key = (self.owner.document_key(), identity(node), editable(node),
+                   node.name() if node else "")
             if key != self.last_node:
                 self.owner.sync_layer(node)
                 self.last_node = key
@@ -122,13 +129,34 @@ class CanvasSelection(QObject):
 
     def select_node(self, node, keep_arrow=None):
         window = Krita.instance().activeWindow()
+        document = self.owner.document
+        view = window.activeView() if window else None
+        if not document or not view or view.document() != document:
+            raise ValueError('ページ切り替え中です。表示後に選択してください')
+        ancestor = node
+        while ancestor and ancestor.parentNode():
+            ancestor = ancestor.parentNode()
+        if not node or identity(ancestor) != identity(document.rootNode()):
+            raise ValueError('選択レイヤーが現在の原稿にありません')
         self.keep_arrow = bool(window and tool_name(window.qwindow()) == ARROW) if keep_arrow is None else keep_arrow
         self.pending = (self.owner.document_key(), identity(node), time.monotonic()+2)
-        self.owner.document.setActiveNode(node)
+        if keep_arrow is not False:
+            self.tool_retention.layer_operation(tool_name(window.qwindow()), time.monotonic())
+        document.setActiveNode(node)
         QTimer.singleShot(0, self.poll)
 
     def eventFilter(self, obj, event):
         typ = event.type()
+        layer_navigation = typ == QEvent.KeyPress and event.key() in (
+            Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right, Qt.Key_Home,
+            Qt.Key_End, Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_PageUp, Qt.Key_PageDown)
+        if typ == QEvent.MouseButtonPress or layer_navigation:
+            ancestor = obj
+            while ancestor is not None:
+                if ancestor.objectName() == 'KisLayerBox' and ancestor.window() == self.owner.window():
+                    self.tool_retention.layer_operation(tool_name(self.owner.window()), time.monotonic())
+                    break
+                ancestor = ancestor.parent()
         # Canvas painting, text confirmation, visibility changes and layer
         # reordering all end in a release/key event. Debounce them into one
         # panel-thumbnail update without rebuilding the layer tree.
@@ -137,6 +165,9 @@ class CanvasSelection(QObject):
         if typ == QEvent.KeyPress or (typ == QEvent.MouseButtonPress and isinstance(obj, QAbstractButton)):
             # A deliberate tool switch takes precedence over restoring the arrow.
             self.keep_arrow = False
+        if typ == QEvent.KeyPress and not layer_navigation:
+            # Keyboard shortcuts are deliberate input, not a layer fallback.
+            self.tool_retention.explicit_choice()
         if (typ == QEvent.MouseButtonPress and isinstance(obj, QAbstractButton)
                 and obj.metaObject().className() == 'KoToolBoxButton'):
             # Never carry an unfinished arrow press into a newly selected
@@ -145,6 +176,7 @@ class CanvasSelection(QObject):
             self.pending = None
             self.native_drag = False
             self.last_tool = None
+            self.tool_retention.explicit_choice()
             QTimer.singleShot(0, self.poll)
             return False
         pointer = (QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.MouseButtonRelease,
