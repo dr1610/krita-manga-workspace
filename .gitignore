@@ -14,3 +14,8 @@ __pycache__/
 
 # Machine-local layerization runtime configuration
 manga_workspace/layerize-local.json
+
+# Per-user model locations and ComfyUI configuration
+extra_model_paths.yaml
+extra_model_paths.yaml.*
+model-folders.local.json

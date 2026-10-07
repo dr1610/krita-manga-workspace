@@ -116,6 +116,8 @@ class WorkspaceExtension(Extension):
         model_menu.setObjectName("manga_generation_models_menu")
         model_menu.addAction("モデルを選ぶ・参考画像を見る…",
                              lambda: self.open_model_browser(window))
+        from .model_paths import open_model_paths
+        model_menu.addAction('モデルフォルダ設定…', lambda: open_model_paths(main))
         main.menuBar().addMenu(model_menu)
         for identity, title in [("manga_pages", "ページ管理を表示"),
                                 ("manga_panels", "コマ割りを表示"),
